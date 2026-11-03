@@ -18,6 +18,20 @@ for d in ["audio", "data", "segments", "output", "preview"]:
     (SHARED_DIR / d).mkdir(parents=True, exist_ok=True)
 
 
+def parse_time_str(t_str: str) -> float:
+    """Parse string like '00:22', '15:35', '01:23:45' or '22' into seconds."""
+    t_str = str(t_str).strip()
+    if not t_str:
+        return 0.0
+    if ":" in t_str:
+        parts = t_str.split(":")
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            return float(parts[0]) * 60 + float(parts[1])
+    return float(t_str)
+
+
 def clean_shared_dir():
     for sub in ["segments", "audio", "data"]:
         p = SHARED_DIR / sub
