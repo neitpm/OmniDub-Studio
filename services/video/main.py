@@ -330,6 +330,7 @@ class RestyleRequest(BaseModel):
     video_path: str
     style: str = "animegan_2d"  # animegan_2d, anime_2d, comic_ink
     output_filename: str = ""
+    remove_watermark: bool = True  # Tự động xóa logo bit.ly, Bilibili, chữ Trung Quốc
 
 
 @app.post("/restyle-2d")
@@ -363,6 +364,20 @@ def restyle_video_2d(req: RestyleRequest):
     target_w, target_h = 896, 512
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(str(temp_video), fourcc, fps, (target_w, target_h))
+
+    # Pre-build watermark inpainting mask at target resolution
+    wm_mask = None
+    if req.remove_watermark:
+        wm_mask = np.zeros((target_h, target_w), dtype=np.uint8)
+        # 1. Top-Left: bit.ly / YanHH3D watermark (x: 2% to 26%, y: 9% to 19%)
+        x1_tl, x2_tl = int(target_w * 0.02), int(target_w * 0.28)
+        y1_tl, y2_tl = int(target_h * 0.08), int(target_h * 0.20)
+        wm_mask[y1_tl:y2_tl, x1_tl:x2_tl] = 255
+
+        # 2. Top-Right: bilibili logo (x: 84% to 98%, y: 3% to 14%)
+        x1_tr, x2_tr = int(target_w * 0.84), int(target_w * 0.98)
+        y1_tr, y2_tr = int(target_h * 0.03), int(target_h * 0.14)
+        wm_mask[y1_tr:y2_tr, x1_tr:x2_tr] = 255
 
     use_neural = "animegan" in req.style.lower() or "neural" in req.style.lower() or req.style == "animegan_2d" or "2d" in req.style.lower()
     weight_choice = "paprika" if "paprika" in req.style.lower() or "ghibli" in req.style.lower() or req.style == "animegan_2d" else "face_paint_512_v1"
@@ -402,6 +417,10 @@ def restyle_video_2d(req: RestyleRequest):
             if not ret:
                 break
             frame_resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+            # Inpaint watermarks / logos if enabled
+            if wm_mask is not None:
+                frame_resized = cv2.inpaint(frame_resized, wm_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
 
             if use_neural and model is not None:
                 rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
