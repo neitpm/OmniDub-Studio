@@ -289,16 +289,32 @@ def trim_video(req: TrimRequest):
     }
 
 
+anime_model = None
+
+def get_anime_model():
+    global anime_model
+    if anime_model is None:
+        import torch
+        print("[i] Loading Neural AnimeGANv2 model...")
+        anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained='face_paint_512_v2', trust_repo=True)
+        anime_model.eval()
+        print("[OK] AnimeGANv2 loaded.")
+    return anime_model
+
+
 class RestyleRequest(BaseModel):
     video_path: str
-    style: str = "anime_2d"  # anime_2d, comic_ink, vibrant_cel
+    style: str = "animegan_2d"  # animegan_2d, anime_2d, comic_ink
     output_filename: str = ""
 
 
 @app.post("/restyle-2d")
 def restyle_video_2d(req: RestyleRequest):
-    """Transform 3D video frames into clean 2D hand-drawn anime / manga style."""
+    """Transform 3D video frames into genuine 2D hand-drawn anime using AnimeGANv2 Neural Network."""
     import cv2
+    import torch
+    from PIL import Image
+    import torchvision.transforms.functional as TF
 
     video_abs = SHARED_DIR / req.video_path
     if not video_abs.exists():
@@ -321,48 +337,46 @@ def restyle_video_2d(req: RestyleRequest):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Scale down slightly if 4k to accelerate processing
-    target_w, target_h = width, height
-    if width > 1280:
-        target_w = 1280
-        target_h = int(height * (1280 / width))
-
+    # Scale to standard 720p 16:9 for clean neural transformation
+    target_w, target_h = 896, 512
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(str(temp_video), fourcc, fps, (target_w, target_h))
 
+    use_neural = "animegan" in req.style.lower() or "neural" in req.style.lower() or req.style == "animegan_2d"
+    model = get_anime_model() if use_neural else None
+
     frame_count = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame_count += 1
+    with torch.no_grad():
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_count += 1
 
-        if (target_w, target_h) != (width, height):
-            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            frame_resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-        # 1. Edge detection (Black anime line-art)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_blur = cv2.medianBlur(gray, 5)
-        edges = cv2.adaptiveThreshold(
-            gray_blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 7
-        )
+            if use_neural and model is not None:
+                # 1. PURE 2D NEURAL ANIMEGANv2 TRANSFORMATION
+                img_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(img_rgb)
+                t_in = TF.to_tensor(pil_img).unsqueeze(0) * 2 - 1
 
-        # 2. Cel-shading / Bilateral color flattening (Removes 3D lighting gradients)
-        color = cv2.bilateralFilter(frame, d=7, sigmaColor=60, sigmaSpace=60)
-        
-        # Color quantization: 8 tone levels for authentic 2D anime feel
-        color = (color // 24) * 24 + 12
+                t_out = model(t_in)
+                t_out = torch.clamp((t_out.squeeze(0) + 1) / 2, 0, 1)
 
-        # 3. Combine Cel-Shading + Lineart
-        edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        anime_frame = cv2.bitwise_and(color, edges_3ch)
-
-        # Subtle saturation boost
-        hsv = cv2.cvtColor(anime_frame, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.15, 0, 255)
-        anime_frame = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-
-        out.write(anime_frame)
+                pil_out = TF.to_pil_image(t_out)
+                anime_bgr = cv2.cvtColor(np.array(pil_out), cv2.COLOR_RGB2BGR)
+                out.write(anime_bgr)
+            else:
+                # Fast cel-shading fallback
+                gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+                gray_blur = cv2.medianBlur(gray, 5)
+                edges = cv2.adaptiveThreshold(gray_blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 7)
+                color = cv2.bilateralFilter(frame_resized, d=7, sigmaColor=60, sigmaSpace=60)
+                color = (color // 24) * 24 + 12
+                edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+                anime_frame = cv2.bitwise_and(color, edges_3ch)
+                out.write(anime_frame)
 
     cap.release()
     out.release()
@@ -372,7 +386,7 @@ def restyle_video_2d(req: RestyleRequest):
         "-y",
         "-i", str(temp_video),
         "-i", str(video_abs),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "19",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-map", "0:v:0",
         "-map", "1:a:0?",
         "-c:a", "aac", "-b:a", "192k",
@@ -382,7 +396,6 @@ def restyle_video_2d(req: RestyleRequest):
     try:
         run_ffmpeg(cmd_mux)
     except Exception as e:
-        # Fallback without audio map
         shutil.copy(temp_video, out_abs)
 
     temp_video.unlink(missing_ok=True)

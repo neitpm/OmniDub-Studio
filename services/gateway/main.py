@@ -674,10 +674,11 @@ def main():
                         )
                         restyle_style = gr.Dropdown(
                             choices=[
-                                "Anime 2D Cel-Shading (Nét vẽ tay Manga, màu tươi sáng)",
+                                "AnimeGAN AI 2D (Chuyển thể Mạng Neural - Phong cách Hoạt hình Shinkai/Ghibli)",
+                                "Anime 2D Cel-Shading (Nét vẽ tay Manga, màu phẳng tươi sáng)",
                                 "2D Hoạt Hình Comic (Nét viền đậm, phong cách truyện tranh)"
                             ],
-                            value="Anime 2D Cel-Shading (Nét vẽ tay Manga, màu tươi sáng)",
+                            value="AnimeGAN AI 2D (Chuyển thể Mạng Neural - Phong cách Hoạt hình Shinkai/Ghibli)",
                             label="2. Chọn phong cách vẽ 2D"
                         )
                         restyle_btn = gr.Button("🎨 Bắt đầu Tải & Vẽ Lại Thành Video 2D", variant="primary", size="lg")
