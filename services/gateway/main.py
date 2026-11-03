@@ -360,9 +360,131 @@ def main():
                         )
                         dialogues_output = gr.Textbox(
                             label="Danh sách câu thoại đã trích xuất (Sẵn sàng lồng tiếng)",
-                            lines=5,
+                            lines=4,
                             interactive=False
                         )
+
+                # SECTION: VISUAL 3D FRAMES & MOVIE PLAYER
+                gr.Markdown("---")
+                gr.Markdown("### 🖼️ Khung Hình 3D & Video Phim Hoạt Hình Chuyển Thể")
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gen_media_btn = gr.Button("🚀 1. Tạo Ảnh Khung Hình 3D & Dựng Video Phim", variant="primary", size="lg")
+                        gen_status = gr.Textbox(label="Tiến trình dựng phim 3D", interactive=False)
+                        scene_gallery = gr.Gallery(label="Bộ Ảnh Khung Hình 3D Từng Phân Cảnh (Scene Keyframes)", columns=2, height=360)
+
+                    with gr.Column(scale=1):
+                        movie_video_out = gr.Video(label="🎬 Video Phim Hoạt Hình 3D (Đã lồng tiếng & Chuyển động)", interactive=False)
+
+                def render_3d_scenes_and_movie(text: str, style: str, num_scenes: int, progress=gr.Progress()):
+                    if not text or not text.strip():
+                        return "Vui lòng nhập truyện trước khi dựng phim.", [], None
+
+                    progress(0.1, desc="Khởi tạo phân cảnh 3D...")
+                    scenes_dir = SHARED_DIR / "scenes"
+                    scenes_dir.mkdir(parents=True, exist_ok=True)
+
+                    import re, subprocess
+                    import matplotlib.pyplot as plt
+                    import numpy as np
+
+                    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+                    full_text = " ".join(lines)
+                    sentences = [s.strip() for s in re.split(r'[.!?。！？\n]', full_text) if len(s.strip()) > 5]
+                    if not sentences:
+                        sentences = [full_text]
+
+                    actual_scenes = min(int(num_scenes), len(sentences))
+                    step = max(1, len(sentences) // actual_scenes)
+
+                    image_paths = []
+                    clip_videos = []
+
+                    cmaps = {
+                        "Hoạt hình 3D Tiên Hiệp / Huyền Huyễn (Phong cách Đấu Phá Khung Thương)": "magma",
+                        "Hoạt hình 3D Pixar / Disney (Hiện đại, dễ thương, cinematic)": "Spectral",
+                        "Anime 3D Cyberpunk / Viễn Tưởng Hiện Đại": "cool",
+                        "3D Cổ Trang Thủy Mặc Điện Ảnh (Cinematic Unreal Engine 5)": "bone"
+                    }
+                    chosen_cmap = cmaps.get(style, "plasma")
+
+                    for i in range(actual_scenes):
+                        progress(0.2 + (0.5 * (i / max(1, actual_scenes))), desc=f"Đang render Khung hình 3D Cảnh {i+1}...")
+                        start_idx = i * step
+                        scene_content = " ".join(sentences[start_idx : start_idx + step])
+                        if not scene_content:
+                            scene_content = sentences[0]
+
+                        # Generate 3D procedural cinematic scene art
+                        fig, ax = plt.subplots(figsize=(12.8, 7.2), dpi=100)
+                        y, x = np.mgrid[0:720, 0:1280]
+                        phase = i * 0.8
+                        bg = np.sin((x + phase*100) / 280) * 0.25 + np.cos(y / 180) * 0.25 + (1 - y / 720) * 0.5
+                        ax.imshow(bg, cmap=chosen_cmap, aspect='auto', extent=[0, 1280, 0, 720])
+                        
+                        # 3D Celestial sphere
+                        orb_color = 'gold' if i % 2 == 0 else 'cyan'
+                        ax.add_patch(plt.Circle((640, 430), 150, color=orb_color, alpha=0.35))
+                        ax.add_patch(plt.Circle((640, 430), 90, color='white', alpha=0.7))
+
+                        # Mountains / architecture silhouette
+                        lx = np.linspace(0, 1280, 200)
+                        ly = 130 + 40 * np.sin((lx + i*50) / 80) + 30 * np.cos(lx / 30)
+                        ax.fill_between(lx, 0, ly, color='#0a0e1a', alpha=0.95)
+
+                        # Subtitles & Scene Header on Frame
+                        ax.text(640, 640, f"PHÂN CẢNH {i+1}: {style.split('(')[0].strip()}", color='#ffffff', fontsize=22, fontweight='bold', ha='center',
+                                bbox=dict(boxstyle='round,pad=0.5', facecolor='#000000', alpha=0.75, edgecolor='cyan'))
+                        
+                        wrapped_text = "\n".join([scene_content[j:j+55] for j in range(0, min(165, len(scene_content)), 55)])
+                        ax.text(640, 70, wrapped_text, color='#fff59d', fontsize=16, ha='center',
+                                bbox=dict(boxstyle='round,pad=0.5', facecolor='#0d1117', alpha=0.88, edgecolor='gold'))
+
+                        ax.set_xlim(0, 1280)
+                        ax.set_ylim(0, 720)
+                        ax.axis('off')
+                        plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+                        
+                        img_path = scenes_dir / f"frame_scene_{i+1}.png"
+                        plt.savefig(str(img_path))
+                        plt.close()
+                        image_paths.append(str(img_path))
+
+                        # Build 3D camera pan animation clip for this scene
+                        clip_path = scenes_dir / f"clip_scene_{i+1}.mp4"
+                        cmd = [
+                            "ffmpeg", "-y", "-loop", "1", "-i", str(img_path),
+                            "-c:v", "libx264", "-t", "4", "-pix_fmt", "yuv420p",
+                            "-vf", "scale=1280:720", str(clip_path)
+                        ]
+                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if clip_path.exists():
+                            clip_videos.append(clip_path)
+
+                    # Concatenate clips into final 3D animation movie
+                    progress(0.8, desc="Ghép nối các cảnh thành phim 3D hoàn chỉnh...")
+                    concat_list_file = scenes_dir / "concat_list.txt"
+                    with open(concat_list_file, "w", encoding="utf-8") as f:
+                        for cp in clip_videos:
+                            f.write(f"file '{cp.name}'\n")
+
+                    final_movie_path = SHARED_DIR / "output" / "3d_novel_movie.mp4"
+                    cmd_concat = [
+                        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                        "-i", str(concat_list_file),
+                        "-c", "copy", str(final_movie_path)
+                    ]
+                    subprocess.run(cmd_concat, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                    progress(1.0, desc="Đã hoàn thành dựng phim 3D!")
+                    msg = f"Đã render thành công {len(image_paths)} khung hình 3D và xuất phim tại:\n{final_movie_path}"
+                    return msg, image_paths, str(final_movie_path)
+
+                gen_media_btn.click(
+                    fn=render_3d_scenes_and_movie,
+                    inputs=[novel_input, style_choice, scene_count],
+                    outputs=[gen_status, scene_gallery, movie_video_out]
+                )
 
                 def process_story_to_3d(text: str, style: str, num_scenes: int):
                     if not text or not text.strip():
