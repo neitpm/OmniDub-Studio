@@ -478,24 +478,25 @@ def main():
                             except Exception:
                                 dur = 4.0
 
-                        # 3. RENDER 3D VIDEO CLIP WITH SUBTITLES & AUDIO
+                        # 3. RENDER 3D VIDEO CLIP WITH GUARANTEED AUDIO
                         clip_path = scenes_dir / f"clip_{scene_idx}.mp4"
                         
+                        # If audio file is missing or failed, generate a silent wav so every clip has identical audio streams
+                        if not audio_path.exists() or audio_path.stat().st_size < 100:
+                            subprocess.run([
+                                "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                                "-t", str(dur), "-c:a", "pcm_s16le", str(audio_path)
+                            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
                         cmd_clip = [
-                            "ffmpeg", "-y", "-loop", "1", "-i", str(img_path)
-                        ]
-                        if audio_path.exists():
-                            cmd_clip.extend(["-i", str(audio_path)])
-                        
-                        cmd_clip.extend([
+                            "ffmpeg", "-y", "-loop", "1", "-i", str(img_path),
+                            "-i", str(audio_path),
                             "-c:v", "libx264", "-t", str(dur), "-pix_fmt", "yuv420p",
-                            "-vf", "scale=1024:768,zoompan=z='min(zoom+0.001,1.15)':d=125:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1024x768"
-                        ])
-
-                        if audio_path.exists():
-                            cmd_clip.extend(["-c:a", "aac", "-b:a", "192k", "-shortest"])
-
-                        cmd_clip.append(str(clip_path))
+                            "-vf", "scale=1024:768,zoompan=z='min(zoom+0.001,1.15)':d=125:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1024x768",
+                            "-c:a", "aac", "-b:a", "192k", "-ar", "16000", "-ac", "1",
+                            "-shortest",
+                            str(clip_path)
+                        ]
                         subprocess.run(cmd_clip, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                         if clip_path.exists() and clip_path.stat().st_size > 1000:
@@ -512,7 +513,8 @@ def main():
                     cmd_concat = [
                         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
                         "-i", str(concat_list_file),
-                        "-c", "copy", str(final_movie_path)
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                        str(final_movie_path)
                     ]
                     subprocess.run(cmd_concat, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
