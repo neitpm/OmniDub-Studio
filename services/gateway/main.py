@@ -720,7 +720,7 @@ def main():
                             "style": style_val,
                             "output_filename": out_name
                         },
-                        timeout=600
+                        timeout=1800  # Cho phép render tới 30 phút mà không bị timeout
                     )
                     res.raise_for_status()
                     data = res.json()

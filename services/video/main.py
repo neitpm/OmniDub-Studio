@@ -366,17 +366,27 @@ def restyle_video_2d(req: RestyleRequest):
 
                 pil_out = TF.to_pil_image(t_out)
                 anime_bgr = cv2.cvtColor(np.array(pil_out), cv2.COLOR_RGB2BGR)
-                out.write(anime_bgr)
-            else:
-                # Fast cel-shading fallback
+
+                # Add crisp Manga black lineart layer to completely eliminate CGI 3D edge artifacts
                 gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-                gray_blur = cv2.medianBlur(gray, 5)
-                edges = cv2.adaptiveThreshold(gray_blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 7)
-                color = cv2.bilateralFilter(frame_resized, d=7, sigmaColor=60, sigmaSpace=60)
-                color = (color // 24) * 24 + 12
+                edges = cv2.adaptiveThreshold(cv2.medianBlur(gray, 5), 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 8)
                 edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-                anime_frame = cv2.bitwise_and(color, edges_3ch)
-                out.write(anime_frame)
+                final_2d = cv2.bitwise_and(anime_bgr, edges_3ch)
+
+                out.write(final_2d)
+            else:
+                # 2. ULTRA-FAST HIGH-QUALITY 2D POSTERIZATION (Eliminates all 3D smooth gradients)
+                div = 36
+                lut = np.arange(256, dtype=np.uint8) // div * div + div // 2
+                color_quant = cv2.LUT(frame_resized, lut)
+                color_flat = cv2.bilateralFilter(color_quant, 9, 85, 85)
+
+                gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
+                edges = cv2.adaptiveThreshold(cv2.medianBlur(gray, 5), 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 9)
+                edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+
+                final_2d = cv2.bitwise_and(color_flat, edges_3ch)
+                out.write(final_2d)
 
     cap.release()
     out.release()
