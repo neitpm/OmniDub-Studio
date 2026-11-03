@@ -1,0 +1,8 @@
+gradio>=5.0
+torch>=2.2
+faster-whisper>=0.10
+transformers>=4.45
+sentencepiece>=0.2
+soundfile
+numpy
+yt-dlp

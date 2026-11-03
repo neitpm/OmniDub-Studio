@@ -1,0 +1,100 @@
+services:
+  gateway:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    container_name: translate-gateway
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+      - "8088:8000"
+    environment:
+      - SHARED_DIR=/shared_data
+      - STT_URL=http://stt-service:8001
+      - TRANS_URL=http://translation-service:8002
+      - TTS_URL=http://tts-service:8003
+      - VIDEO_URL=http://video-service:8004
+      - PORT=7860
+    volumes:
+      - ./shared_data:/shared_data
+    depends_on:
+      - stt-service
+      - translation-service
+      - tts-service
+      - video-service
+
+  stt-service:
+    build:
+      context: ./services/stt
+      dockerfile: Dockerfile
+    container_name: translate-stt
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - SHARED_DIR=/shared_data
+    volumes:
+      - ./shared_data:/shared_data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  translation-service:
+    build:
+      context: ./services/translation
+      dockerfile: Dockerfile
+    container_name: translate-translation
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    environment:
+      - SHARED_DIR=/shared_data
+    volumes:
+      - ./shared_data:/shared_data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  tts-service:
+    build:
+      context: ./services/tts
+      dockerfile: Dockerfile
+    container_name: translate-tts
+    restart: unless-stopped
+    ports:
+      - "8003:8003"
+    environment:
+      - SHARED_DIR=/shared_data
+    volumes:
+      - ./shared_data:/shared_data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  video-service:
+    build:
+      context: ./services/video
+      dockerfile: Dockerfile
+    container_name: translate-video
+    restart: unless-stopped
+    ports:
+      - "8004:8004"
+    environment:
+      - SHARED_DIR=/shared_data
+    volumes:
+      - ./shared_data:/shared_data
+
+volumes:
+  shared_data:

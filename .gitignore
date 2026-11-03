@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Shared runtime volume data & temp files
+shared_data/
+audio/
+data/
+segments/
+output/
+video/
+*.mp4
+*.m4a
+*.wav
+*.part
+
+# Secrets or caches
+.cache/
+.pytest_cache/
