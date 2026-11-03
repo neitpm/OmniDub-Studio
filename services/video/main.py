@@ -338,8 +338,6 @@ def restyle_video_2d(req: RestyleRequest):
     """Transform 3D video frames into genuine 2D hand-drawn anime using AnimeGANv2 Neural Network."""
     import cv2
     import torch
-    from PIL import Image
-    import torchvision.transforms.functional as TF
 
     video_abs = SHARED_DIR / req.video_path
     if not video_abs.exists():
@@ -381,16 +379,14 @@ def restyle_video_2d(req: RestyleRequest):
             frame_resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
             if use_neural and model is not None:
-                # 1. PURE 2D NEURAL ANIMEGANv2 TRANSFORMATION ON GPU/CPU
-                img_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-                pil_img = Image.fromarray(img_rgb)
-                t_in = (TF.to_tensor(pil_img).unsqueeze(0).to(dev) * 2 - 1)
+                # 1. PURE 2D NEURAL ANIMEGANv2 TRANSFORMATION ON GPU (FP16 / FP32)
+                # Convert BGR frame directly with numpy and PyTorch (no torchvision dependency)
+                rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                t_in = torch.from_numpy(rgb.transpose((2, 0, 1))).float().unsqueeze(0).to(dev) / 127.5 - 1.0
 
                 t_out = model(t_in)
-                t_out = torch.clamp((t_out.squeeze(0).cpu() + 1) / 2, 0, 1)
-
-                pil_out = TF.to_pil_image(t_out)
-                anime_bgr = cv2.cvtColor(np.array(pil_out), cv2.COLOR_RGB2BGR)
+                t_out = ((t_out.squeeze(0).clamp(-1, 1) + 1.0) * 127.5).byte().cpu().numpy().transpose((1, 2, 0))
+                anime_bgr = cv2.cvtColor(t_out, cv2.COLOR_RGB2BGR)
 
                 # Add crisp Manga black lineart layer to completely eliminate CGI 3D edge artifacts
                 gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
