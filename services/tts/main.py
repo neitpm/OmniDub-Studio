@@ -49,23 +49,61 @@ class SegmentItem(BaseModel):
 class TTSRequest(BaseModel):
     segments: list[SegmentItem]
     voice: str = "female_standard"
-    multi_speaker: bool = False  # If True, dynamically pick male/female voice per segment
+    multi_speaker: bool = False
 
 
 VOICE_CONFIGS = {
-    # 1. Giọng Nữ
-    "female_standard": {"engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%", "pitch_factor": 1.0, "gender": "female"},
-    "female_youth":    {"engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+8%", "pitch_factor": 1.12, "gender": "female"},
-    "female_calm":     {"engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "-6%", "pitch_factor": 0.94, "gender": "female"},
-    "female_google":   {"engine": "gtts", "lang": "vi", "gender": "female"},
+    # ================= GIỌNG NỮ (FEMALE VOICES) =================
+    "female_standard": {
+        "engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%",
+        "pitch_shift": 1.0, "tempo": 1.0, "gender": "female"
+    },
+    "female_sweet": {
+        "engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%",
+        "pitch_shift": 1.15, "tempo": 1.02, "gender": "female"
+    },
+    "female_review": {
+        "engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%",
+        "pitch_shift": 1.10, "tempo": 1.15, "gender": "female"
+    },
+    "female_gentle": {
+        "engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%",
+        "pitch_shift": 1.04, "tempo": 0.94, "gender": "female"
+    },
+    "female_story": {
+        "engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%",
+        "pitch_shift": 0.92, "tempo": 0.90, "gender": "female"
+    },
+    "female_deep": {
+        "engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%",
+        "pitch_shift": 0.86, "tempo": 0.88, "gender": "female"
+    },
+    "female_news": {
+        "engine": "edge", "voice": "vi-VN-HoaiMyNeural", "rate": "+0%",
+        "pitch_shift": 1.00, "tempo": 1.12, "gender": "female"
+    },
+    "female_google": {
+        "engine": "gtts", "lang": "vi", "gender": "female"
+    },
 
-    # 2. Giọng Nam
-    "male_standard":   {"engine": "edge", "voice": "vi-VN-NamMinhNeural", "rate": "+0%", "pitch_factor": 1.0, "gender": "male"},
-    "male_deep":       {"engine": "edge", "voice": "vi-VN-NamMinhNeural", "rate": "-5%", "pitch_factor": 0.88, "gender": "male"},
-    "male_dynamic":    {"engine": "edge", "voice": "vi-VN-NamMinhNeural", "rate": "+8%", "pitch_factor": 1.05, "gender": "male"},
+    # ================= GIỌNG NAM (MALE VOICES) =================
+    "male_standard": {
+        "engine": "edge", "voice": "vi-VN-NamMinhNeural", "rate": "+0%",
+        "pitch_shift": 1.0, "tempo": 1.0, "gender": "male"
+    },
+    "male_deep": {
+        "engine": "edge", "voice": "vi-VN-NamMinhNeural", "rate": "+0%",
+        "pitch_shift": 0.88, "tempo": 0.94, "gender": "male"
+    },
+    "male_dynamic": {
+        "engine": "edge", "voice": "vi-VN-NamMinhNeural", "rate": "+0%",
+        "pitch_shift": 1.05, "tempo": 1.12, "gender": "male"
+    },
 
-    # 3. Giọng AI Cục Bộ
-    "mms":             {"engine": "mms", "gender": "neutral"}
+    # ================= GIỌNG AI OFFLINE =================
+    "mms": {
+        "engine": "mms", "gender": "neutral"
+    }
 }
 
 
@@ -109,22 +147,27 @@ async def generate_audio_file(text: str, voice_cfg: dict, out_wav: Path):
             tts = gTTS(clean_text, lang="vi")
             tts.save(str(tmp_mp3))
 
-        # Convert to WAV & apply pitch factor if any
-        pitch_factor = voice_cfg.get("pitch_factor", 1.0)
-        if abs(pitch_factor - 1.0) > 0.02:
-            sr_shift = int(16000 * pitch_factor)
-            subprocess.run([
-                "ffmpeg", "-y", "-i", str(tmp_mp3),
-                "-af", f"asetrate={sr_shift},aresample=16000",
-                "-ac", "1", "-c:a", "pcm_s16le",
-                str(out_wav)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        else:
-            subprocess.run([
-                "ffmpeg", "-y", "-i", str(tmp_mp3),
-                "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-                str(out_wav)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        pitch_shift = voice_cfg.get("pitch_shift", 1.0)
+        tempo = voice_cfg.get("tempo", 1.0)
+
+        # Build FFmpeg audio filter for rich voice coloration
+        filters = []
+        if abs(pitch_shift - 1.0) > 0.01:
+            sr_shift = int(16000 * pitch_shift)
+            atempo_val = round((1.0 / pitch_shift) * tempo, 4)
+            filters.append(f"asetrate={sr_shift}")
+            # atempo supports values between 0.5 and 2.0
+            if abs(atempo_val - 1.0) > 0.01:
+                filters.append(f"atempo={atempo_val}")
+        elif abs(tempo - 1.0) > 0.01:
+            filters.append(f"atempo={tempo}")
+
+        cmd = ["ffmpeg", "-y", "-i", str(tmp_mp3)]
+        if filters:
+            cmd.extend(["-af", ",".join(filters)])
+        cmd.extend(["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(out_wav)])
+
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         tmp_mp3.unlink(missing_ok=True)
 
     elif engine == "gtts":
@@ -172,7 +215,7 @@ async def synthesize(req: TTSRequest):
         try:
             await generate_audio_file(text, seg_voice_cfg, wav_path)
             if seg_voice_cfg.get("engine") in ["edge", "gtts"]:
-                await asyncio.sleep(0.06)
+                await asyncio.sleep(0.04)
             success_count += 1
         except Exception as e:
             print(f"[!] Error on segment {idx} ('{text}'): {e}")
@@ -182,7 +225,7 @@ async def synthesize(req: TTSRequest):
         d["audio"] = wav_path.relative_to(SHARED_DIR).as_posix()
         out_segments.append(d)
 
-    print(f"[OK] Successfully synthesized {success_count}/{len(req.segments)} segments (multi_speaker={req.multi_speaker}).")
+    print(f"[OK] Successfully synthesized {success_count}/{len(req.segments)} segments (voice={default_voice_key}, multi_spk={req.multi_speaker}).")
     return {"segments": out_segments}
 
 

@@ -62,13 +62,22 @@ def download_youtube(url: str, out_dir: Path) -> Path:
 
 
 VOICE_KEY_MAP = {
+    # Nhóm giọng Nữ
     "Nữ - Hoài My (Truyền cảm, tiêu chuẩn)": "female_standard",
-    "Nữ - Trẻ trung, tươi sáng": "female_youth",
-    "Nữ - Dịu dàng, trầm tĩnh": "female_calm",
+    "Nữ - Ngọt ngào, trong trẻo (Tâm tình / Review)": "female_sweet",
+    "Nữ - Review phim, TikTok năng động": "female_review",
+    "Nữ - Dịu dàng, thủ thỉ (Audiobook / Kể chuyện)": "female_gentle",
+    "Nữ - Đọc truyện đêm khuya, tình cảm": "female_story",
+    "Nữ - Trầm ấm, sâu lắng (Phóng sự / Tài liệu)": "female_deep",
+    "Nữ - Phát thanh viên, bản tin nhanh": "female_news",
     "Nữ - Chị Google (Google TTS)": "female_google",
+
+    # Nhóm giọng Nam
     "Nam - Nam Minh (Ấm áp, tiêu chuẩn)": "male_standard",
     "Nam - Trầm ấm, phóng sự / phim tài liệu": "male_deep",
     "Nam - Năng động, tin tức nhanh": "male_dynamic",
+
+    # Giọng AI Offline
     "MMS AI (Mô hình Local GPU)": "mms",
 }
 
