@@ -290,16 +290,25 @@ def trim_video(req: TrimRequest):
 
 
 anime_model = None
+device = "cpu"
 
 def get_anime_model():
-    global anime_model
+    global anime_model, device
     if anime_model is None:
         import torch
-        print("[i] Loading Neural AnimeGANv2 model...")
-        anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained='face_paint_512_v2', trust_repo=True)
-        anime_model.eval()
-        print("[OK] AnimeGANv2 loaded.")
-    return anime_model
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[i] Loading Neural AnimeGANv2 model on {device.upper()}...")
+        try:
+            anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained='face_paint_512_v2', trust_repo=True)
+            anime_model = anime_model.to(device)
+            anime_model.eval()
+            print(f"[OK] AnimeGANv2 loaded successfully on {device.upper()}.")
+        except Exception as e:
+            print(f"[!] Fallback to CPU due to: {e}")
+            device = "cpu"
+            anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained='face_paint_512_v2', trust_repo=True).to("cpu")
+            anime_model.eval()
+    return anime_model, device
 
 
 class RestyleRequest(BaseModel):
@@ -343,7 +352,7 @@ def restyle_video_2d(req: RestyleRequest):
     out = cv2.VideoWriter(str(temp_video), fourcc, fps, (target_w, target_h))
 
     use_neural = "animegan" in req.style.lower() or "neural" in req.style.lower() or req.style == "animegan_2d"
-    model = get_anime_model() if use_neural else None
+    model, dev = get_anime_model() if use_neural else (None, "cpu")
 
     frame_count = 0
     with torch.no_grad():
@@ -356,13 +365,13 @@ def restyle_video_2d(req: RestyleRequest):
             frame_resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
             if use_neural and model is not None:
-                # 1. PURE 2D NEURAL ANIMEGANv2 TRANSFORMATION
+                # 1. PURE 2D NEURAL ANIMEGANv2 TRANSFORMATION ON GPU/CPU
                 img_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
                 pil_img = Image.fromarray(img_rgb)
-                t_in = TF.to_tensor(pil_img).unsqueeze(0) * 2 - 1
+                t_in = (TF.to_tensor(pil_img).unsqueeze(0).to(dev) * 2 - 1)
 
                 t_out = model(t_in)
-                t_out = torch.clamp((t_out.squeeze(0) + 1) / 2, 0, 1)
+                t_out = torch.clamp((t_out.squeeze(0).cpu() + 1) / 2, 0, 1)
 
                 pil_out = TF.to_pil_image(t_out)
                 anime_bgr = cv2.cvtColor(np.array(pil_out), cv2.COLOR_RGB2BGR)

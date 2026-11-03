@@ -95,6 +95,13 @@ services:
       - SHARED_DIR=/shared_data
     volumes:
       - ./shared_data:/shared_data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   shared_data:
