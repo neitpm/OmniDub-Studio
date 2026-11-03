@@ -589,8 +589,81 @@ def main():
                     outputs=[storyboard_output, dialogues_output]
                 )
 
-            # TAB 3: TRIM & CUT VIDEO STUDIO
-            with gr.TabItem("✂️ 3. Chỉnh Sửa & Cắt Video"):
+            # TAB 3: VIDEO RESTYLE 3D TO 2D ANIME STUDIO
+            with gr.TabItem("🖌️ 3. Vẽ Lại Video 3D ➔ Hoạt Hình 2D (Remake)"):
+                gr.Markdown(
+                    """
+                    ### 🎨 Chuyển Thể Video 3D Gốc Thành Phim Hoạt Hình 2D Độc Quyền
+                    Tải video 3D bất kỳ (hoặc dùng video vừa tải từ Bilibili/YouTube). Hệ thống AI sẽ:
+                    1. **Bóc tách nét vẽ đen (Line-art)**: Giữ nguyên 100% từng chuyển động, động tác võ thuật và góc quay của video gốc.
+                    2. **Làm phẳng màu 2D (Cel-Shading)**: Xóa bỏ hoàn toàn lớp đổ bóng 3D của họ, biến thành màu sắc vẽ tay phong cách Anime/Manga 2D.
+                    3. **Xuất ra video 2D mới toanh** thuộc quyền sở hữu của bạn, không lo vi phạm bản quyền video 3D của tác giả gốc!
+                    """
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        restyle_input_video = gr.Video(
+                            label="Video 3D gốc cần vẽ lại (Để trống sẽ tự động lấy video vừa tải)",
+                            sources=["upload"]
+                        )
+                        restyle_style = gr.Dropdown(
+                            choices=[
+                                "Anime 2D Cel-Shading (Nét vẽ tay Manga, màu tươi sáng)",
+                                "2D Hoạt Hình Comic (Nét viền đậm, phong cách truyện tranh)"
+                            ],
+                            value="Anime 2D Cel-Shading (Nét vẽ tay Manga, màu tươi sáng)",
+                            label="Phong cách vẽ 2D"
+                        )
+                        restyle_btn = gr.Button("🎨 Bắt đầu Vẽ Lại Thành Video 2D", variant="primary", size="lg")
+
+                    with gr.Column(scale=1):
+                        restyle_video_out = gr.Video(label="🎬 Video 2D Hoàn Chỉnh Sau Khi Vẽ Lại", interactive=False)
+                        restyle_status = gr.Textbox(label="Tiến trình vẽ lại", interactive=False)
+
+                def handle_restyle(v_in, style_val):
+                    if not v_in:
+                        # Find downloaded video or dubbed video
+                        cands = list((SHARED_DIR / "audio").glob("downloaded_video.*"))
+                        if cands:
+                            rel_p = cands[0].relative_to(SHARED_DIR).as_posix()
+                        else:
+                            fallback = SHARED_DIR / "output" / "dubbed_video.mp4"
+                            if fallback.exists():
+                                rel_p = "output/dubbed_video.mp4"
+                            else:
+                                raise ValueError("Vui lòng tải hoặc upload video cần vẽ lại trước.")
+                    else:
+                        p = Path(v_in)
+                        if str(SHARED_DIR) in str(p):
+                            rel_p = p.relative_to(SHARED_DIR).as_posix()
+                        else:
+                            rel_p = f"output/input_restyle_{p.name}"
+                            shutil.copy(p, SHARED_DIR / rel_p)
+
+                    out_name = f"anime_2d_{int(time.time())}.mp4"
+                    res = requests.post(
+                        f"{VIDEO_URL}/restyle-2d",
+                        json={
+                            "video_path": rel_p,
+                            "style": style_val,
+                            "output_filename": out_name
+                        },
+                        timeout=300
+                    )
+                    res.raise_for_status()
+                    data = res.json()
+                    out_f = SHARED_DIR / data["restyle_video"]
+                    msg = f"Đã vẽ lại thành công {data['frames_processed']} khung hình sang phong cách Hoạt hình 2D!\nFile lưu tại: {out_f}"
+                    return str(out_f), msg
+
+                restyle_btn.click(
+                    fn=handle_restyle,
+                    inputs=[restyle_input_video, restyle_style],
+                    outputs=[restyle_video_out, restyle_status]
+                )
+
+            # TAB 4: TRIM & CUT VIDEO STUDIO
+            with gr.TabItem("✂️ 4. Chỉnh Sửa & Cắt Video"):
                 gr.Markdown("### Cắt lấy đoạn video mong muốn từ video vừa tạo hoặc upload video mới")
                 with gr.Row():
                     with gr.Column(scale=1):
