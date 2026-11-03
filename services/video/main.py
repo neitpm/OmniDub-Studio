@@ -369,7 +369,7 @@ def restyle_video_2d(req: RestyleRequest):
     wm_mask = None
     if req.remove_watermark:
         wm_mask = np.zeros((target_h, target_w), dtype=np.uint8)
-        # 1. Top-Left: bit.ly / YanHH3D watermark (x: 2% to 26%, y: 9% to 19%)
+        # 1. Top-Left: bit.ly / YanHH3D watermark (x: 2% to 28%, y: 8% to 20%)
         x1_tl, x2_tl = int(target_w * 0.02), int(target_w * 0.28)
         y1_tl, y2_tl = int(target_h * 0.08), int(target_h * 0.20)
         wm_mask[y1_tl:y2_tl, x1_tl:x2_tl] = 255
@@ -378,6 +378,11 @@ def restyle_video_2d(req: RestyleRequest):
         x1_tr, x2_tr = int(target_w * 0.84), int(target_w * 0.98)
         y1_tr, y2_tr = int(target_h * 0.03), int(target_h * 0.14)
         wm_mask[y1_tr:y2_tr, x1_tr:x2_tr] = 255
+
+        # 3. Bottom-Right: Logo Mục Thần Ký / Tên phim chữ đỏ (x: 86% to 99%, y: 85% to 98%)
+        x1_br, x2_br = int(target_w * 0.86), int(target_w * 0.99)
+        y1_br, y2_br = int(target_h * 0.85), int(target_h * 0.98)
+        wm_mask[y1_br:y2_br, x1_br:x2_br] = 255
 
     use_neural = "animegan" in req.style.lower() or "neural" in req.style.lower() or req.style == "animegan_2d" or "2d" in req.style.lower()
     weight_choice = "paprika" if "paprika" in req.style.lower() or "ghibli" in req.style.lower() or req.style == "animegan_2d" else "face_paint_512_v1"
