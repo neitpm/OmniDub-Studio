@@ -306,24 +306,23 @@ def check_cuda_usable():
         print(f"[!] CUDA detected but compute kernel unavailable ({e}). Falling back to optimized multi-thread CPU.")
         return False
 
-def get_anime_model():
+def get_anime_model(weight_name: str = "paprika"):
     global anime_model, device
-    if anime_model is None:
-        import torch
-        torch.set_num_threads(max(1, os.cpu_count() or 4))
-        is_cuda = check_cuda_usable()
-        device = "cuda" if is_cuda else "cpu"
-        print(f"[i] Loading Neural AnimeGANv2 model on {device.upper()}...")
-        try:
-            anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained='face_paint_512_v2', trust_repo=True)
-            anime_model = anime_model.to(device)
-            anime_model.eval()
-            print(f"[OK] AnimeGANv2 loaded successfully on {device.upper()}.")
-        except Exception as e:
-            print(f"[!] Fallback to CPU due to: {e}")
-            device = "cpu"
-            anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained='face_paint_512_v2', trust_repo=True).to("cpu")
-            anime_model.eval()
+    import torch
+    torch.set_num_threads(max(1, os.cpu_count() or 4))
+    is_cuda = check_cuda_usable()
+    device = "cuda" if is_cuda else "cpu"
+    print(f"[i] Loading Neural AnimeGANv2 ({weight_name}) on {device.upper()}...")
+    try:
+        anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained=weight_name, trust_repo=True)
+        anime_model = anime_model.to(device)
+        anime_model.eval()
+        print(f"[OK] AnimeGANv2 ({weight_name}) loaded successfully on {device.upper()}.")
+    except Exception as e:
+        print(f"[!] Fallback to CPU due to: {e}")
+        device = "cpu"
+        anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained=weight_name, trust_repo=True).to("cpu")
+        anime_model.eval()
     return anime_model, device
 
 
@@ -365,18 +364,31 @@ def restyle_video_2d(req: RestyleRequest):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(str(temp_video), fourcc, fps, (target_w, target_h))
 
-    use_neural = "animegan" in req.style.lower() or "neural" in req.style.lower() or req.style == "animegan_2d"
-    model, dev = get_anime_model() if use_neural else (None, "cpu")
+    use_neural = "animegan" in req.style.lower() or "neural" in req.style.lower() or req.style == "animegan_2d" or "2d" in req.style.lower()
+    weight_choice = "paprika" if "paprika" in req.style.lower() or "ghibli" in req.style.lower() or req.style == "animegan_2d" else "face_paint_512_v1"
+    model, dev = get_anime_model(weight_choice) if use_neural else (None, "cpu")
 
     frame_count = 0
     batch_size = 12 if dev == "cuda" else 2
 
     def postprocess_frame(args):
         anime_bgr, frame_orig = args
+        # 1. Clean Manga Canny Edge extraction
         gray = cv2.cvtColor(frame_orig, cv2.COLOR_BGR2GRAY)
-        edges = cv2.adaptiveThreshold(cv2.medianBlur(gray, 5), 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 8)
-        edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        return cv2.bitwise_and(anime_bgr, edges_3ch)
+        canny = cv2.Canny(cv2.GaussianBlur(gray, (7, 7), 0), 45, 115)
+        kernel = np.ones((2, 2), np.uint8)
+        canny = cv2.dilate(canny, kernel, iterations=1)
+        edge_mask = cv2.bitwise_not(canny)
+        edge_3ch = cv2.cvtColor(edge_mask, cv2.COLOR_GRAY2BGR)
+
+        # 2. Composite with AnimeGAN 2D
+        combined = cv2.bitwise_and(anime_bgr, edge_3ch)
+
+        # 3. Boost saturation and contrast for hand-drawn anime cel look
+        hsv = cv2.cvtColor(combined, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.35 + 15, 0, 255)
+        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.2 + 20, 0, 255)
+        return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
     from concurrent.futures import ThreadPoolExecutor
     worker_threads = min(8, os.cpu_count() or 4)
