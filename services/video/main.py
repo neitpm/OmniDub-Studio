@@ -369,45 +369,68 @@ def restyle_video_2d(req: RestyleRequest):
     model, dev = get_anime_model() if use_neural else (None, "cpu")
 
     frame_count = 0
-    with torch.no_grad():
+    batch_size = 12 if dev == "cuda" else 2
+
+    def postprocess_frame(args):
+        anime_bgr, frame_orig = args
+        gray = cv2.cvtColor(frame_orig, cv2.COLOR_BGR2GRAY)
+        edges = cv2.adaptiveThreshold(cv2.medianBlur(gray, 5), 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 8)
+        edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        return cv2.bitwise_and(anime_bgr, edges_3ch)
+
+    from concurrent.futures import ThreadPoolExecutor
+    worker_threads = min(8, os.cpu_count() or 4)
+
+    with torch.no_grad(), ThreadPoolExecutor(max_workers=worker_threads) as executor:
+        batch_frames = []
+        batch_orig = []
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            frame_count += 1
-
             frame_resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
             if use_neural and model is not None:
-                # 1. PURE 2D NEURAL ANIMEGANv2 TRANSFORMATION ON GPU (FP16 / FP32)
-                # Convert BGR frame directly with numpy and PyTorch (no torchvision dependency)
                 rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-                t_in = torch.from_numpy(rgb.transpose((2, 0, 1))).float().unsqueeze(0).to(dev) / 127.5 - 1.0
+                batch_frames.append(rgb.transpose((2, 0, 1)))
+                batch_orig.append(frame_resized)
 
-                t_out = model(t_in)
-                t_out = ((t_out.squeeze(0).clamp(-1, 1) + 1.0) * 127.5).byte().cpu().numpy().transpose((1, 2, 0))
-                anime_bgr = cv2.cvtColor(t_out, cv2.COLOR_RGB2BGR)
+                if len(batch_frames) >= batch_size:
+                    # Parallel GPU Tensor inference on Batch of frames
+                    t_in = torch.from_numpy(np.array(batch_frames)).float().to(dev) / 127.5 - 1.0
+                    t_out = model(t_in)
+                    anime_arr = ((t_out.clamp(-1, 1) + 1.0) * 127.5).byte().cpu().numpy().transpose((0, 2, 3, 1))
 
-                # Add crisp Manga black lineart layer to completely eliminate CGI 3D edge artifacts
-                gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-                edges = cv2.adaptiveThreshold(cv2.medianBlur(gray, 5), 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 8)
-                edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-                final_2d = cv2.bitwise_and(anime_bgr, edges_3ch)
-
-                out.write(final_2d)
+                    anime_bgr_list = [cv2.cvtColor(img, cv2.COLOR_RGB2BGR) for img in anime_arr]
+                    # Multi-threaded edge & composition pipeline across CPU threads
+                    final_frames = list(executor.map(postprocess_frame, zip(anime_bgr_list, batch_orig)))
+                    for f in final_frames:
+                        out.write(f)
+                    frame_count += len(final_frames)
+                    batch_frames.clear()
+                    batch_orig.clear()
             else:
-                # 2. ULTRA-FAST HIGH-QUALITY 2D POSTERIZATION (Eliminates all 3D smooth gradients)
                 div = 36
                 lut = np.arange(256, dtype=np.uint8) // div * div + div // 2
                 color_quant = cv2.LUT(frame_resized, lut)
                 color_flat = cv2.bilateralFilter(color_quant, 9, 85, 85)
-
                 gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
                 edges = cv2.adaptiveThreshold(cv2.medianBlur(gray, 5), 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 9)
                 edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+                out.write(cv2.bitwise_and(color_flat, edges_3ch))
+                frame_count += 1
 
-                final_2d = cv2.bitwise_and(color_flat, edges_3ch)
-                out.write(final_2d)
+        # Process remaining frames in batch
+        if batch_frames and use_neural and model is not None:
+            t_in = torch.from_numpy(np.array(batch_frames)).float().to(dev) / 127.5 - 1.0
+            t_out = model(t_in)
+            anime_arr = ((t_out.clamp(-1, 1) + 1.0) * 127.5).byte().cpu().numpy().transpose((0, 2, 3, 1))
+            anime_bgr_list = [cv2.cvtColor(img, cv2.COLOR_RGB2BGR) for img in anime_arr]
+            final_frames = list(executor.map(postprocess_frame, zip(anime_bgr_list, batch_orig)))
+            for f in final_frames:
+                out.write(f)
+            frame_count += len(final_frames)
 
     cap.release()
     out.release()
