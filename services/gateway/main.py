@@ -46,6 +46,14 @@ def download_youtube(url: str, out_dir: Path) -> Path:
         "outtmpl": template,
         "merge_output_format": "mp4",
         "overwrites": True,
+        # Tự động tiếp tục và thử lại khi mạng đứt quãng
+        "retries": 15,
+        "fragment_retries": 15,
+        "continuedl": True,
+        "file_access_retries": 10,
+        "socket_timeout": 30,
+        "http_chunk_size": 10485760,  # 10MB chunk để tránh timeout socket
+        "nocheckcertificate": True,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(clean_url, download=True)
