@@ -95,13 +95,25 @@ def crawl_hh3d_stream(url: str, out_dir: Path, download_full: bool = True) -> Pa
     return out_mp4
 
 
-def download_youtube(url: str, out_dir: Path) -> Path:
+def download_youtube(url: str, out_dir: Path, start_time: str = "", end_time: str = "") -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     clean_url = clean_video_url(url)
 
     # Check if URL is from specialized anime sites like HH3D
     if "hh3d.com" in clean_url or "donghua" in clean_url:
-        return crawl_hh3d_stream(clean_url, out_dir)
+        full_video = crawl_hh3d_stream(clean_url, out_dir)
+        if start_time or end_time:
+            # Cut specific range from downloaded video
+            s_sec = parse_time_str(start_time) if start_time else 0.0
+            cmd_cut = ["ffmpeg", "-y", "-ss", str(s_sec), "-i", str(full_video)]
+            if end_time:
+                e_sec = parse_time_str(end_time)
+                cmd_cut.extend(["-to", str(e_sec)])
+            cut_mp4 = out_dir / "downloaded_video_cut.mp4"
+            cmd_cut.extend(["-c", "copy", str(cut_mp4)])
+            subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return cut_mp4
+        return full_video
 
     template = str(out_dir / "downloaded_video.%(ext)s")
     opts = {
@@ -118,6 +130,8 @@ def download_youtube(url: str, out_dir: Path) -> Path:
         "http_chunk_size": 10485760,  # 10MB chunk để tránh timeout socket
         "nocheckcertificate": True,
     }
+
+    # If start_time or end_time is provided, download with external downloader ffmpeg args or post-trim
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(clean_url, download=True)
         fn = ydl.prepare_filename(info)
@@ -125,10 +139,23 @@ def download_youtube(url: str, out_dir: Path) -> Path:
         if not p.exists():
             mp4_p = p.with_suffix(".mp4")
             if mp4_p.exists():
-                return mp4_p
-            cands = list(out_dir.glob("downloaded_video.*"))
-            if cands:
-                return cands[0]
+                p = mp4_p
+            else:
+                cands = list(out_dir.glob("downloaded_video.*"))
+                if cands:
+                    p = cands[0]
+
+        if start_time or end_time:
+            s_sec = parse_time_str(start_time) if start_time else 0.0
+            cmd_cut = ["ffmpeg", "-y", "-ss", str(s_sec), "-i", str(p)]
+            if end_time:
+                e_sec = parse_time_str(end_time)
+                cmd_cut.extend(["-to", str(e_sec)])
+            cut_mp4 = out_dir / "downloaded_video_cut.mp4"
+            cmd_cut.extend(["-c", "copy", str(cut_mp4)])
+            subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return cut_mp4
+
         return p
 
 
@@ -669,6 +696,17 @@ def main():
                             label="1. Nhập URL video cần crawl (YouTube / Bilibili / HH3D)",
                             placeholder="https://www.bilibili.com/video/... hoặc https://youtube.com/..."
                         )
+                        with gr.Row():
+                            restyle_start_time = gr.Textbox(
+                                label="Thời gian bắt đầu cắt (Ví dụ: 22 hoặc 00:22)",
+                                placeholder="00:22 hoặc để trống lấy từ đầu",
+                                value="00:22"
+                            )
+                            restyle_end_time = gr.Textbox(
+                                label="Thời gian kết thúc cắt (Ví dụ: 15:35)",
+                                placeholder="15:35 hoặc để trống lấy đến hết",
+                                value="15:35"
+                            )
                         restyle_input_video = gr.Video(
                             label="Hoặc upload file video từ máy (Để trống sẽ lấy video vừa tải)",
                             sources=["upload"]
@@ -688,10 +726,10 @@ def main():
                         restyle_video_out = gr.Video(label="🎬 Video 2D Hoàn Chỉnh Sau Khi Vẽ Lại", interactive=False)
                         restyle_status = gr.Textbox(label="Tiến trình vẽ lại", interactive=False)
 
-                def handle_restyle(url_in, v_in, style_val, progress=gr.Progress()):
+                def handle_restyle(url_in, start_t, end_t, v_in, style_val, progress=gr.Progress()):
                     if url_in and url_in.strip():
-                        progress(0.1, desc="Đang crawl và tải video về...")
-                        dl_path = download_youtube(url_in.strip(), SHARED_DIR / "audio")
+                        progress(0.1, desc="Đang crawl và tải đoạn video yêu cầu về...")
+                        dl_path = download_youtube(url_in.strip(), SHARED_DIR / "audio", start_time=start_t.strip(), end_time=end_t.strip())
                         rel_p = dl_path.relative_to(SHARED_DIR).as_posix()
                     elif v_in:
                         p = Path(v_in)
@@ -701,8 +739,8 @@ def main():
                             rel_p = f"output/input_restyle_{p.name}"
                             shutil.copy(p, SHARED_DIR / rel_p)
                     else:
-                        # Find downloaded video or dubbed video
-                        cands = list((SHARED_DIR / "audio").glob("downloaded_video.*"))
+                        # Find cut video or downloaded video or dubbed video
+                        cands = list((SHARED_DIR / "audio").glob("downloaded_video_cut.mp4")) or list((SHARED_DIR / "audio").glob("downloaded_video.*"))
                         if cands:
                             rel_p = cands[0].relative_to(SHARED_DIR).as_posix()
                         else:
@@ -712,14 +750,15 @@ def main():
                             else:
                                 raise ValueError("Vui lòng nhập link video hoặc upload video cần vẽ lại trước.")
 
-                    progress(0.3, desc="Đang chuyển thể đồ họa sang phong cách Anime 2D...")
+                    progress(0.3, desc="Đang tẩy watermark & chuyển thể đồ họa sang phong cách Anime 2D...")
                     out_name = f"anime_2d_{int(time.time())}.mp4"
                     res = requests.post(
                         f"{VIDEO_URL}/restyle-2d",
                         json={
                             "video_path": rel_p,
                             "style": style_val,
-                            "output_filename": out_name
+                            "output_filename": out_name,
+                            "remove_watermark": True
                         },
                         timeout=1800  # Cho phép render tới 30 phút mà không bị timeout
                     )
@@ -732,7 +771,7 @@ def main():
 
                 restyle_btn.click(
                     fn=handle_restyle,
-                    inputs=[restyle_url_box, restyle_input_video, restyle_style],
+                    inputs=[restyle_url_box, restyle_start_time, restyle_end_time, restyle_input_video, restyle_style],
                     outputs=[restyle_video_out, restyle_status]
                 )
 
