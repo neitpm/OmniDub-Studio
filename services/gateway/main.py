@@ -380,13 +380,12 @@ def main():
                     if not text or not text.strip():
                         return "Vui lòng nhập truyện trước khi dựng phim.", [], None
 
-                    progress(0.1, desc="Khởi tạo phân cảnh 3D...")
+                    progress(0.05, desc="Bắt đầu chuyển thể truyện thành hình ảnh & video 3D...")
                     scenes_dir = SHARED_DIR / "scenes"
                     scenes_dir.mkdir(parents=True, exist_ok=True)
 
-                    import re, subprocess
-                    import matplotlib.pyplot as plt
-                    import numpy as np
+                    import re, subprocess, requests, urllib.parse
+                    from PIL import Image
 
                     lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
                     full_text = " ".join(lines)
@@ -400,70 +399,110 @@ def main():
                     image_paths = []
                     clip_videos = []
 
-                    cmaps = {
-                        "Hoạt hình 3D Tiên Hiệp / Huyền Huyễn (Phong cách Đấu Phá Khung Thương)": "magma",
-                        "Hoạt hình 3D Pixar / Disney (Hiện đại, dễ thương, cinematic)": "Spectral",
-                        "Anime 3D Cyberpunk / Viễn Tưởng Hiện Đại": "cool",
-                        "3D Cổ Trang Thủy Mặc Điện Ảnh (Cinematic Unreal Engine 5)": "bone"
+                    style_prompts = {
+                        "Hoạt hình 3D Tiên Hiệp / Huyền Huyễn (Phong cách Đấu Phá Khung Thương)": 
+                            "3D Chinese Donghua Xianxia anime style, Unreal Engine 5 render, handsome martial arts character with spiritual weapon, cinematic lighting, ancient palace",
+                        "Hoạt hình 3D Pixar / Disney (Hiện đại, dễ thương, cinematic)": 
+                            "3D Disney Pixar character animation style, expressive face, vibrant lighting, highly detailed 3D render",
+                        "Anime 3D Cyberpunk / Viễn Tưởng Hiện Đại": 
+                            "3D futuristic cyberpunk anime warrior, volumetric neon city lights, sleek high-tech character render",
+                        "3D Cổ Trang Thủy Mặc Điện Ảnh (Cinematic Unreal Engine 5)": 
+                            "Cinematic Chinese 3D character, flowing traditional robes, misty mountain background, 8k render"
                     }
-                    chosen_cmap = cmaps.get(style, "plasma")
+                    base_prompt = style_prompts.get(style, "3D Donghua Xianxia anime character render")
+
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                        'Referer': 'https://pollinations.ai/'
+                    }
 
                     for i in range(actual_scenes):
-                        progress(0.2 + (0.5 * (i / max(1, actual_scenes))), desc=f"Đang render Khung hình 3D Cảnh {i+1}...")
+                        scene_idx = i + 1
+                        progress(0.1 + (0.7 * (i / max(1, actual_scenes))), desc=f"Đang sinh ảnh Nhân Vật 3D & Lồng tiếng Cảnh {scene_idx}/{actual_scenes}...")
                         start_idx = i * step
                         scene_content = " ".join(sentences[start_idx : start_idx + step])
                         if not scene_content:
                             scene_content = sentences[0]
 
-                        # Generate 3D procedural cinematic scene art
-                        fig, ax = plt.subplots(figsize=(12.8, 7.2), dpi=100)
-                        y, x = np.mgrid[0:720, 0:1280]
-                        phase = i * 0.8
-                        bg = np.sin((x + phase*100) / 280) * 0.25 + np.cos(y / 180) * 0.25 + (1 - y / 720) * 0.5
-                        ax.imshow(bg, cmap=chosen_cmap, aspect='auto', extent=[0, 1280, 0, 720])
+                        # 1. GENERATE REAL 3D CHARACTER IMAGE FROM PROMPT (Text-to-Image AI)
+                        img_path = scenes_dir / f"scene_{scene_idx}.jpg"
                         
-                        # 3D Celestial sphere
-                        orb_color = 'gold' if i % 2 == 0 else 'cyan'
-                        ax.add_patch(plt.Circle((640, 430), 150, color=orb_color, alpha=0.35))
-                        ax.add_patch(plt.Circle((640, 430), 90, color='white', alpha=0.7))
+                        # Build prompt with keywords from story
+                        prompt_query = f"{base_prompt}, scene {scene_idx}, {scene_content[:80]}"
+                        encoded_prompt = urllib.parse.quote(prompt_query)
+                        img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=turbo&nologo=true&seed={100 + scene_idx}"
 
-                        # Mountains / architecture silhouette
-                        lx = np.linspace(0, 1280, 200)
-                        ly = 130 + 40 * np.sin((lx + i*50) / 80) + 30 * np.cos(lx / 30)
-                        ax.fill_between(lx, 0, ly, color='#0a0e1a', alpha=0.95)
+                        try:
+                            res = requests.get(img_url, headers=headers, timeout=12)
+                            if res.status_code == 200 and len(res.content) > 5000:
+                                with open(img_path, "wb") as f:
+                                    f.write(res.content)
+                        except Exception as e:
+                            print(f"[!] Image gen error for scene {scene_idx}: {e}")
 
-                        # Subtitles & Scene Header on Frame
-                        ax.text(640, 640, f"PHÂN CẢNH {i+1}: {style.split('(')[0].strip()}", color='#ffffff', fontsize=22, fontweight='bold', ha='center',
-                                bbox=dict(boxstyle='round,pad=0.5', facecolor='#000000', alpha=0.75, edgecolor='cyan'))
-                        
-                        wrapped_text = "\n".join([scene_content[j:j+55] for j in range(0, min(165, len(scene_content)), 55)])
-                        ax.text(640, 70, wrapped_text, color='#fff59d', fontsize=16, ha='center',
-                                bbox=dict(boxstyle='round,pad=0.5', facecolor='#0d1117', alpha=0.88, edgecolor='gold'))
+                        # Fallback if needed
+                        if not img_path.exists() or img_path.stat().st_size < 5000:
+                            # Use fallback sample or copy
+                            fallback_src = SHARED_DIR / "preview" / "sample_real_3d.jpg"
+                            if fallback_src.exists():
+                                shutil.copy(fallback_src, img_path)
 
-                        ax.set_xlim(0, 1280)
-                        ax.set_ylim(0, 720)
-                        ax.axis('off')
-                        plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-                        
-                        img_path = scenes_dir / f"frame_scene_{i+1}.png"
-                        plt.savefig(str(img_path))
-                        plt.close()
                         image_paths.append(str(img_path))
 
-                        # Build 3D camera pan animation clip for this scene
-                        clip_path = scenes_dir / f"clip_scene_{i+1}.mp4"
-                        cmd = [
-                            "ffmpeg", "-y", "-loop", "1", "-i", str(img_path),
-                            "-c:v", "libx264", "-t", "4", "-pix_fmt", "yuv420p",
-                            "-vf", "scale=1280:720", str(clip_path)
+                        # 2. GENERATE AUDIO VOICE FOR THIS SCENE (TTS Service)
+                        audio_path = scenes_dir / f"audio_{scene_idx}.wav"
+                        try:
+                            # Call TTS microservice to synthesize voice
+                            tts_res = requests.post(
+                                f"{TTS_URL}/synthesize",
+                                json={
+                                    "segments": [{"start": 0.0, "end": 4.0, "text": f"s_{scene_idx}", "translation": scene_content[:150]}],
+                                    "voice": "female_standard"
+                                },
+                                timeout=15
+                            )
+                            tts_data = tts_res.json()
+                            gen_audio = SHARED_DIR / tts_data["segments"][0]["audio"]
+                            shutil.copy(gen_audio, audio_path)
+                        except Exception as e:
+                            print(f"[!] TTS error scene {scene_idx}: {e}")
+
+                        # Get audio duration
+                        dur = 4.0
+                        if audio_path.exists() and audio_path.stat().st_size > 1000:
+                            try:
+                                cmd_p = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path)]
+                                dur_str = subprocess.check_output(cmd_p).decode().strip()
+                                dur = max(3.0, float(dur_str))
+                            except Exception:
+                                dur = 4.0
+
+                        # 3. RENDER 3D VIDEO CLIP WITH SUBTITLES & AUDIO
+                        clip_path = scenes_dir / f"clip_{scene_idx}.mp4"
+                        
+                        cmd_clip = [
+                            "ffmpeg", "-y", "-loop", "1", "-i", str(img_path)
                         ]
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        if clip_path.exists():
+                        if audio_path.exists():
+                            cmd_clip.extend(["-i", str(audio_path)])
+                        
+                        cmd_clip.extend([
+                            "-c:v", "libx264", "-t", str(dur), "-pix_fmt", "yuv420p",
+                            "-vf", "scale=1024:768,zoompan=z='min(zoom+0.001,1.15)':d=125:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1024x768"
+                        ])
+
+                        if audio_path.exists():
+                            cmd_clip.extend(["-c:a", "aac", "-b:a", "192k", "-shortest"])
+
+                        cmd_clip.append(str(clip_path))
+                        subprocess.run(cmd_clip, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                        if clip_path.exists() and clip_path.stat().st_size > 1000:
                             clip_videos.append(clip_path)
 
-                    # Concatenate clips into final 3D animation movie
-                    progress(0.8, desc="Ghép nối các cảnh thành phim 3D hoàn chỉnh...")
-                    concat_list_file = scenes_dir / "concat_list.txt"
+                    # 4. CONCATENATE ALL SCENE CLIPS INTO COMPLETE MOVIE
+                    progress(0.9, desc="Ghép toàn bộ phân cảnh thành phim hoạt hình 3D hoàn chỉnh...")
+                    concat_list_file = scenes_dir / "concat_movie_list.txt"
                     with open(concat_list_file, "w", encoding="utf-8") as f:
                         for cp in clip_videos:
                             f.write(f"file '{cp.name}'\n")
@@ -476,8 +515,8 @@ def main():
                     ]
                     subprocess.run(cmd_concat, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                    progress(1.0, desc="Đã hoàn thành dựng phim 3D!")
-                    msg = f"Đã render thành công {len(image_paths)} khung hình 3D và xuất phim tại:\n{final_movie_path}"
+                    progress(1.0, desc="Đã hoàn tất chuyển thể Truyện ➔ Phim Hoạt Hình 3D!")
+                    msg = f"Đã chuyển thể thành công {len(image_paths)} cảnh với Nhân vật 3D & Giọng đọc thuyết minh tại:\n{final_movie_path}"
                     return msg, image_paths, str(final_movie_path)
 
                 gen_media_btn.click(
