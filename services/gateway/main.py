@@ -775,7 +775,7 @@ def main():
                             "output_filename": out_name,
                             "remove_watermark": True
                         },
-                        timeout=1800  # Cho phép render tới 30 phút mà không bị timeout
+                        timeout=3600  # Cho phép render tới 60 phút cho các tập phim dài mà không bị timeout
                     )
                     res.raise_for_status()
                     data = res.json()
