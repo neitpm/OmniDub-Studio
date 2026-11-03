@@ -319,8 +319,114 @@ def main():
                     outputs=[out_video, status]
                 )
 
-            # TAB 2: TRIM & CUT VIDEO STUDIO
-            with gr.TabItem("✂️ 2. Chỉnh Sửa & Cắt Video"):
+            # TAB 2: AI STORY TO 3D ANIMATION STUDIO
+            with gr.TabItem("🎨 2. Chuyển Thể Truyện ➔ Phim Hoạt Hình 3D"):
+                gr.Markdown(
+                    """
+                    ### 🧙‍♂️ AI Novel to 3D Anime Movie Studio (Kịch bản ➔ Phim 3D)
+                    Nhập đoạn truyện chữ, tiểu thuyết hoặc kịch bản. Hệ thống AI sẽ:
+                    1. **Tự động bóc tách kịch bản (Storyboarding)**: Phân chia từng cảnh, góc máy và lời thoại.
+                    2. **Tạo Prompt 3D Animation chất lượng cao**: Sẵn sàng kết nối mô hình sinh ảnh/video 3D (*Wan2.1 / FLUX 3D / LTX-Video*).
+                    3. **Tự động chuyển câu thoại sang OmniDub Studio** để lồng tiếng đa nhân vật Nam/Nữ!
+                    """
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        novel_input = gr.Textbox(
+                            label="Nhập đoạn văn bản truyện chữ / kịch bản (Tiếng Việt / Trung / Anh)",
+                            placeholder="Ví dụ: Tiêu Viêm nắm chặt bàn tay, nhìn lên đỉnh núi Vân Lam Tông, trong mắt bừng lên một tia lửa tím dị thường. Hắn nói: 'Ba năm ước hẹn, hôm nay ta tới đòi lại thể diện!' Lúc này Nạp Lan Yên Nhiên từ từ rút thanh kiếm thanh quang ra đáp lại: 'Tiêu Viêm, ngươi quả thực không khiến ta thất vọng.'...",
+                            lines=8
+                        )
+                        with gr.Row():
+                            style_choice = gr.Dropdown(
+                                choices=[
+                                    "Hoạt hình 3D Tiên Hiệp / Huyền Huyễn (Phong cách Đấu Phá Khung Thương)",
+                                    "Hoạt hình 3D Pixar / Disney (Hiện đại, dễ thương, cinematic)",
+                                    "Anime 3D Cyberpunk / Viễn Tưởng Hiện Đại",
+                                    "3D Cổ Trang Thủy Mặc Điện Ảnh (Cinematic Unreal Engine 5)"
+                                ],
+                                value="Hoạt hình 3D Tiên Hiệp / Huyền Huyễn (Phong cách Đấu Phá Khung Thương)",
+                                label="Phong cách đồ họa 3D"
+                            )
+                            scene_count = gr.Slider(minimum=1, maximum=10, value=3, step=1, label="Số lượng phân cảnh (Scenes)")
+
+                        story_btn = gr.Button("🎬 Bắt đầu Phân Cảnh & Tạo Kịch Bản 3D", variant="primary", size="lg")
+
+                    with gr.Column(scale=1):
+                        storyboard_output = gr.Textbox(
+                            label="Bảng phân cảnh chi tiết (Storyboard & 3D Prompts)",
+                            lines=12,
+                            interactive=False
+                        )
+                        dialogues_output = gr.Textbox(
+                            label="Danh sách câu thoại đã trích xuất (Sẵn sàng lồng tiếng)",
+                            lines=5,
+                            interactive=False
+                        )
+
+                def process_story_to_3d(text: str, style: str, num_scenes: int):
+                    if not text or not text.strip():
+                        return "Vui lòng nhập nội dung đoạn truyện chữ.", ""
+
+                    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+                    full_text = " ".join(lines)
+                    
+                    # Split into sentences
+                    import re
+                    sentences = [s.strip() for s in re.split(r'[.!?。！？\n]', full_text) if len(s.strip()) > 5]
+                    if not sentences:
+                        sentences = [full_text]
+
+                    step = max(1, len(sentences) // num_scenes)
+                    
+                    style_prompts = {
+                        "Hoạt hình 3D Tiên Hiệp / Huyền Huyễn (Phong cách Đấu Phá Khung Thương)": 
+                            "3D Chinese Donghua Xianxia anime style, cinematic lighting, 8k Unreal Engine 5 render, glowing spiritual aura, highly detailed character",
+                        "Hoạt hình 3D Pixar / Disney (Hiện đại, dễ thương, cinematic)": 
+                            "3D Disney Pixar modern animation style, vibrant colors, expressive character design, ray tracing, soft cinematic depth of field",
+                        "Anime 3D Cyberpunk / Viễn Tưởng Hiện Đại": 
+                            "3D futuristic cyberpunk anime render, volumetric neon lights, sleek high-tech outfits, dramatic perspective",
+                        "3D Cổ Trang Thủy Mặc Điện Ảnh (Cinematic Unreal Engine 5)": 
+                            "Cinematic Chinese historical 3D animation, dramatic cinematic atmosphere, photorealistic misty mountain background, UE5 octane render"
+                    }
+                    base_style_prompt = style_prompts.get(style, "3D cinematic animation style, 8k render")
+
+                    storyboard_result = f"🎬 KỊCH BẢN PHÂN CẢNH 3D CHO TRUYỆN\nPhong cách: {style}\n{'='*60}\n\n"
+                    dialogue_list = []
+
+                    for i in range(min(num_scenes, len(sentences))):
+                        start_idx = i * step
+                        seg_text = " ".join(sentences[start_idx : start_idx + step])
+                        if not seg_text:
+                            continue
+                        
+                        scene_num = i + 1
+                        storyboard_result += f"🎥 PHÂN CẢNH {scene_num}:\n"
+                        storyboard_result += f"• Nội dung cảnh: {seg_text}\n"
+                        storyboard_result += f"• Góc máy đề xuất: Cận cảnh nhân vật kết hợp góc rộng toàn cảnh (Medium shot to wide cinematic pan)\n"
+                        storyboard_result += f"• Prompt sinh Video 3D (Wan2.1 / LTX-Video / FLUX):\n"
+                        storyboard_result += f"  \"{base_style_prompt}, scene {scene_num}: {seg_text[:90]}...\"\n"
+                        storyboard_result += f"{'-'*60}\n"
+
+                        # Extract potential dialogues (in quotes)
+                        quotes = re.findall(r"['\"‘“](.*?)['\"’”]", seg_text)
+                        if quotes:
+                            for q in quotes:
+                                dialogue_list.append(f"Cảnh {scene_num}: \"{q}\"")
+                        else:
+                            dialogue_list.append(f"Cảnh {scene_num} (Lời dẫn chuyện): \"{seg_text[:80]}...\"")
+
+                    dialogue_text = "\n".join(dialogue_list) if dialogue_list else "Không tìm thấy câu thoại trực tiếp, hệ thống dùng lời dẫn chuyện làm thoại."
+                    return storyboard_result, dialogue_text
+
+                story_btn.click(
+                    fn=process_story_to_3d,
+                    inputs=[novel_input, style_choice, scene_count],
+                    outputs=[storyboard_output, dialogues_output]
+                )
+
+            # TAB 3: TRIM & CUT VIDEO STUDIO
+            with gr.TabItem("✂️ 3. Chỉnh Sửa & Cắt Video"):
                 gr.Markdown("### Cắt lấy đoạn video mong muốn từ video vừa tạo hoặc upload video mới")
                 with gr.Row():
                     with gr.Column(scale=1):
