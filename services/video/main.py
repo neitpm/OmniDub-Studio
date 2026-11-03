@@ -292,11 +292,27 @@ def trim_video(req: TrimRequest):
 anime_model = None
 device = "cpu"
 
+def check_cuda_usable():
+    """Verify if CUDA can actually run tensor computations (sm_120 Blackwell check)."""
+    import torch
+    if not torch.cuda.is_available():
+        return False
+    try:
+        t = torch.zeros(1, device="cuda")
+        _ = t + 1
+        torch.cuda.synchronize()
+        return True
+    except Exception as e:
+        print(f"[!] CUDA detected but compute kernel unavailable ({e}). Falling back to optimized multi-thread CPU.")
+        return False
+
 def get_anime_model():
     global anime_model, device
     if anime_model is None:
         import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        torch.set_num_threads(max(1, os.cpu_count() or 4))
+        is_cuda = check_cuda_usable()
+        device = "cuda" if is_cuda else "cpu"
         print(f"[i] Loading Neural AnimeGANv2 model on {device.upper()}...")
         try:
             anime_model = torch.hub.load('bryandlee/animegan2-pytorch:main', 'generator', pretrained='face_paint_512_v2', trust_repo=True)
