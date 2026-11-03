@@ -602,8 +602,12 @@ def main():
                 )
                 with gr.Row():
                     with gr.Column(scale=1):
+                        restyle_url_box = gr.Textbox(
+                            label="1. Nhập URL video cần crawl (YouTube / Bilibili / HH3D)",
+                            placeholder="https://www.bilibili.com/video/... hoặc https://youtube.com/..."
+                        )
                         restyle_input_video = gr.Video(
-                            label="Video 3D gốc cần vẽ lại (Để trống sẽ tự động lấy video vừa tải)",
+                            label="Hoặc upload file video từ máy (Để trống sẽ lấy video vừa tải)",
                             sources=["upload"]
                         )
                         restyle_style = gr.Dropdown(
@@ -612,16 +616,27 @@ def main():
                                 "2D Hoạt Hình Comic (Nét viền đậm, phong cách truyện tranh)"
                             ],
                             value="Anime 2D Cel-Shading (Nét vẽ tay Manga, màu tươi sáng)",
-                            label="Phong cách vẽ 2D"
+                            label="2. Chọn phong cách vẽ 2D"
                         )
-                        restyle_btn = gr.Button("🎨 Bắt đầu Vẽ Lại Thành Video 2D", variant="primary", size="lg")
+                        restyle_btn = gr.Button("🎨 Bắt đầu Tải & Vẽ Lại Thành Video 2D", variant="primary", size="lg")
 
                     with gr.Column(scale=1):
                         restyle_video_out = gr.Video(label="🎬 Video 2D Hoàn Chỉnh Sau Khi Vẽ Lại", interactive=False)
                         restyle_status = gr.Textbox(label="Tiến trình vẽ lại", interactive=False)
 
-                def handle_restyle(v_in, style_val):
-                    if not v_in:
+                def handle_restyle(url_in, v_in, style_val, progress=gr.Progress()):
+                    if url_in and url_in.strip():
+                        progress(0.1, desc="Đang crawl và tải video về...")
+                        dl_path = download_youtube(url_in.strip(), SHARED_DIR / "audio")
+                        rel_p = dl_path.relative_to(SHARED_DIR).as_posix()
+                    elif v_in:
+                        p = Path(v_in)
+                        if str(SHARED_DIR) in str(p):
+                            rel_p = p.relative_to(SHARED_DIR).as_posix()
+                        else:
+                            rel_p = f"output/input_restyle_{p.name}"
+                            shutil.copy(p, SHARED_DIR / rel_p)
+                    else:
                         # Find downloaded video or dubbed video
                         cands = list((SHARED_DIR / "audio").glob("downloaded_video.*"))
                         if cands:
@@ -631,15 +646,9 @@ def main():
                             if fallback.exists():
                                 rel_p = "output/dubbed_video.mp4"
                             else:
-                                raise ValueError("Vui lòng tải hoặc upload video cần vẽ lại trước.")
-                    else:
-                        p = Path(v_in)
-                        if str(SHARED_DIR) in str(p):
-                            rel_p = p.relative_to(SHARED_DIR).as_posix()
-                        else:
-                            rel_p = f"output/input_restyle_{p.name}"
-                            shutil.copy(p, SHARED_DIR / rel_p)
+                                raise ValueError("Vui lòng nhập link video hoặc upload video cần vẽ lại trước.")
 
+                    progress(0.3, desc="Đang chuyển thể đồ họa sang phong cách Anime 2D...")
                     out_name = f"anime_2d_{int(time.time())}.mp4"
                     res = requests.post(
                         f"{VIDEO_URL}/restyle-2d",
@@ -648,17 +657,18 @@ def main():
                             "style": style_val,
                             "output_filename": out_name
                         },
-                        timeout=300
+                        timeout=600
                     )
                     res.raise_for_status()
                     data = res.json()
                     out_f = SHARED_DIR / data["restyle_video"]
+                    progress(1.0, desc="Hoàn tất vẽ lại video!")
                     msg = f"Đã vẽ lại thành công {data['frames_processed']} khung hình sang phong cách Hoạt hình 2D!\nFile lưu tại: {out_f}"
                     return str(out_f), msg
 
                 restyle_btn.click(
                     fn=handle_restyle,
-                    inputs=[restyle_input_video, restyle_style],
+                    inputs=[restyle_url_box, restyle_input_video, restyle_style],
                     outputs=[restyle_video_out, restyle_status]
                 )
 
