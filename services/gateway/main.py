@@ -440,10 +440,11 @@ def main():
                         except Exception as e:
                             print(f"[!] Image gen error for scene {scene_idx}: {e}")
 
-                        # Fallback if needed
+                        # Fallback to high quality 3D Donghua sample (Tần Mục / Tiên Hiệp 3D) if network rate-limits
                         if not img_path.exists() or img_path.stat().st_size < 5000:
-                            # Use fallback sample or copy
-                            fallback_src = SHARED_DIR / "preview" / "sample_real_3d.jpg"
+                            fallback_src = SHARED_DIR / "preview" / "sample_tan_muc.jpg"
+                            if not fallback_src.exists() or fallback_src.stat().st_size < 5000:
+                                fallback_src = SHARED_DIR / "preview" / "sample_real_3d.jpg"
                             if fallback_src.exists():
                                 shutil.copy(fallback_src, img_path)
 
