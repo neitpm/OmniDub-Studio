@@ -37,9 +37,71 @@ def clean_video_url(url: str) -> str:
     return url
 
 
+def crawl_hh3d_stream(url: str, out_dir: Path) -> Path:
+    """Dedicated crawler for HH3D (Hoạt hình 3D) websites that obfuscate streams inside fake PNGs."""
+    import urllib.request, re, base64, json, subprocess
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_mp4 = out_dir / "downloaded_video.mp4"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+    # 1. Fetch main page
+    req = urllib.request.Request(url, headers=headers)
+    html = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", errors="ignore")
+
+    # 2. Extract player wrapper URL
+    m = re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)
+    if not m:
+        raise ValueError("Không tìm thấy link player trên trang HH3D.")
+
+    player_url = m[0]
+    headers["Referer"] = url
+    headers["Origin"] = "https://www.hh3d.com"
+    req_player = urllib.request.Request(player_url, headers=headers)
+    player_html = urllib.request.urlopen(req_player, timeout=12).read().decode("utf-8", errors="ignore")
+
+    # 3. Decode base64 obfuscated token
+    m_obf = re.search(r'data-obf="([^"]+)"', player_html)
+    if not m_obf:
+        raise ValueError("Không tìm thấy token video mã hóa trên server HH3D.")
+
+    token = m_obf.group(1)
+    token += "=" * (-len(token) % 4)
+    info = json.loads(base64.b64decode(token))
+    stream_m3u8 = info.get("pU") or info.get("sU")
+
+    # 4. Fetch real stream m3u8 playlist
+    headers["Referer"] = player_url
+    req_m3u8 = urllib.request.Request(stream_m3u8, headers=headers)
+    m3u8_text = urllib.request.urlopen(req_m3u8, timeout=12).read().decode("utf-8", errors="ignore")
+
+    seg_urls = [line.strip() for line in m3u8_text.split("\n") if line.strip().startswith("http")]
+    if not seg_urls:
+        raise ValueError("Không tìm thấy segment video trong playlist.")
+
+    # Download first 15 segments (~1.5 minutes) for fast remake/restyling
+    raw_ts = out_dir / "temp_hh3d.ts"
+    with open(raw_ts, "wb") as out_f:
+        for u in seg_urls[:15]:
+            req_seg = urllib.request.Request(u, headers=headers)
+            seg_data = urllib.request.urlopen(req_seg, timeout=20).read()
+            # HH3D conceals TS stream inside fake PNG; TS packet starts at byte 271
+            out_f.write(seg_data[271:])
+
+    # Remux to MP4
+    cmd = ["ffmpeg", "-y", "-i", str(raw_ts), "-c", "copy", str(out_mp4)]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    raw_ts.unlink(missing_ok=True)
+    return out_mp4
+
+
 def download_youtube(url: str, out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     clean_url = clean_video_url(url)
+
+    # Check if URL is from specialized anime sites like HH3D
+    if "hh3d.com" in clean_url or "donghua" in clean_url:
+        return crawl_hh3d_stream(clean_url, out_dir)
+
     template = str(out_dir / "downloaded_video.%(ext)s")
     opts = {
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
