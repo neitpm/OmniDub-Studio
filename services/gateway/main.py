@@ -37,7 +37,7 @@ def clean_video_url(url: str) -> str:
     return url
 
 
-def crawl_hh3d_stream(url: str, out_dir: Path) -> Path:
+def crawl_hh3d_stream(url: str, out_dir: Path, download_full: bool = True) -> Path:
     """Dedicated crawler for HH3D (Hoạt hình 3D) websites that obfuscate streams inside fake PNGs."""
     import urllib.request, re, base64, json, subprocess
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -78,10 +78,11 @@ def crawl_hh3d_stream(url: str, out_dir: Path) -> Path:
     if not seg_urls:
         raise ValueError("Không tìm thấy segment video trong playlist.")
 
-    # Download first 15 segments (~1.5 minutes) for fast remake/restyling
+    # Download full episode segments (or subset if not download_full)
+    target_segments = seg_urls if download_full else seg_urls[:15]
     raw_ts = out_dir / "temp_hh3d.ts"
     with open(raw_ts, "wb") as out_f:
-        for u in seg_urls[:15]:
+        for u in target_segments:
             req_seg = urllib.request.Request(u, headers=headers)
             seg_data = urllib.request.urlopen(req_seg, timeout=20).read()
             # HH3D conceals TS stream inside fake PNG; TS packet starts at byte 271
