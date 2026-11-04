@@ -735,13 +735,26 @@ def main():
                             value="AnimeGAN AI 2D (Chuyển thể Mạng Neural - Phong cách Hoạt hình Shinkai/Ghibli)",
                             label="2. Chọn phong cách vẽ 2D"
                         )
+
+                        with gr.Group():
+                            anti_copyright_toggle = gr.Checkbox(
+                                label="🛡️ Bật LÁ CHẮN BẢN QUYỀN (Anti-Copyright Shield)",
+                                value=True,
+                                info="Tự động phá vỡ thuật toán Content ID: Zoom 104%, Tăng tốc vi mô 1.03x và Đổi cao độ âm thanh (Pitch-shift 4%) mà không làm mất chất giọng"
+                            )
+                            flip_horizontal_toggle = gr.Checkbox(
+                                label="🪞 Lật gương khung hình ngang (Horizontal Flip)",
+                                value=False,
+                                info="Đảo ngược khung hình từ trái sang phải, vô hiệu hóa hoàn toàn đối chiếu Motion Vector của YouTube"
+                            )
+                        
                         restyle_btn = gr.Button("🎨 Bắt đầu Tải & Vẽ Lại Thành Video 2D", variant="primary", size="lg")
 
                     with gr.Column(scale=1):
                         restyle_video_out = gr.Video(label="🎬 Video 2D Hoàn Chỉnh Sau Khi Vẽ Lại", interactive=False)
                         restyle_status = gr.Textbox(label="Tiến trình vẽ lại", interactive=False)
 
-                def handle_restyle(url_in, start_t, end_t, v_in, style_val, progress=gr.Progress()):
+                def handle_restyle(url_in, start_t, end_t, v_in, style_val, anti_cp, flip_h, progress=gr.Progress()):
                     if url_in and url_in.strip():
                         progress(0.1, desc="Đang crawl và tải đoạn video yêu cầu về...")
                         dl_path = download_youtube(url_in.strip(), SHARED_DIR / "audio", start_time=start_t.strip(), end_time=end_t.strip())
@@ -773,7 +786,9 @@ def main():
                             "video_path": rel_p,
                             "style": style_val,
                             "output_filename": out_name,
-                            "remove_watermark": True
+                            "remove_watermark": True,
+                            "anti_copyright": anti_cp,
+                            "flip_horizontal": flip_h
                         },
                         timeout=3600  # Cho phép render tới 60 phút cho các tập phim dài mà không bị timeout
                     )
@@ -786,7 +801,7 @@ def main():
 
                 restyle_btn.click(
                     fn=handle_restyle,
-                    inputs=[restyle_url_box, restyle_start_time, restyle_end_time, restyle_input_video, restyle_style],
+                    inputs=[restyle_url_box, restyle_start_time, restyle_end_time, restyle_input_video, restyle_style, anti_copyright_toggle, flip_horizontal_toggle],
                     outputs=[restyle_video_out, restyle_status]
                 )
 

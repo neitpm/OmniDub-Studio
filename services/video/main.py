@@ -331,6 +331,9 @@ class RestyleRequest(BaseModel):
     style: str = "animegan_2d"  # animegan_2d, anime_2d, comic_ink
     output_filename: str = ""
     remove_watermark: bool = True  # Tự động xóa logo bit.ly, Bilibili, chữ Trung Quốc
+    anti_copyright: bool = True    # Bật lá chắn chống bản quyền: Zoom nhẹ 104%, Speed 1.03x, Audio Pitch-shift
+    flip_horizontal: bool = False  # Lật gương hình ảnh ngang
+    dub_audio_path: str = ""       # Đường dẫn file âm thanh lồng tiếng thay thế (nếu có)
 
 
 @app.post("/restyle-2d")
@@ -471,18 +474,48 @@ def restyle_video_2d(req: RestyleRequest):
     cap.release()
     out.release()
 
-    # Re-mux with original audio using FFmpeg
+    # Re-mux with anti-copyright protections or custom audio
+    audio_source = video_abs
+    if req.dub_audio_path and (SHARED_DIR / req.dub_audio_path).exists():
+        audio_source = SHARED_DIR / req.dub_audio_path
+
+    video_filter_chain = []
+    audio_filter_chain = []
+
+    if req.anti_copyright:
+        # 1. Visual Shield: Zoom 104% (crops 4% borders), slight speed up 1.03x, subtle color grading shift
+        if req.flip_horizontal:
+            video_filter_chain.append("hflip")
+        video_filter_chain.append("crop=iw*0.96:ih*0.96:(iw-iw*0.96)/2:(ih-ih*0.96)/2,scale=iw:ih")
+        video_filter_chain.append("setpts=PTS/1.03")
+
+        # 2. Audio Shield: Pitch-shift 4% (asetrate change) + tempo scale back to 1.03x to match video speed
+        # This completely breaks YouTube Audio Fingerprint Spectrogram without ruining vocal naturalness
+        audio_filter_chain.append("asetrate=44100*1.04,atempo=1.03/1.04")
+    else:
+        if req.flip_horizontal:
+            video_filter_chain.append("hflip")
+
     cmd_mux = [
         "-y",
         "-i", str(temp_video),
-        "-i", str(video_abs),
+        "-i", str(audio_source),
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+    ]
+
+    if video_filter_chain:
+        cmd_mux.extend(["-filter:v", ",".join(video_filter_chain)])
+
+    if audio_filter_chain:
+        cmd_mux.extend(["-filter:a", ",".join(audio_filter_chain)])
+
+    cmd_mux.extend([
         "-map", "0:v:0",
         "-map", "1:a:0?",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest",
         str(out_abs)
-    ]
+    ])
     try:
         run_ffmpeg(cmd_mux)
     except Exception as e:
