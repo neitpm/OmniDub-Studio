@@ -1,0 +1,45 @@
+{
+  "name": "omnidub-studio-app",
+  "productName": "OmniDub Studio",
+  "version": "1.0.0",
+  "description": "Bo tui Electron cho OmniDub Studio: bam nut la chay, khong can go lenh",
+  "main": "main.js",
+  "author": "neitpm",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "smoke": "set ELECTRON_SMOKE=1&& electron .",
+    "dist": "electron-builder --win portable nsis"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.neitpm.omnidubstudio",
+    "productName": "OmniDub Studio",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "portable": {
+      "artifactName": "OmniDubStudio.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "createDesktopShortcut": true,
+      "artifactName": "OmniDubStudio-Setup.exe"
+    }
+  }
+}

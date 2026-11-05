@@ -3,6 +3,7 @@
 import os
 import shutil
 import time
+import itertools
 import subprocess
 from pathlib import Path
 import requests
@@ -15,8 +16,190 @@ TRANS_URL = os.environ.get("TRANS_URL", "http://translation-service:8002")
 TTS_URL = os.environ.get("TTS_URL", "http://tts-service:8003")
 VIDEO_URL = os.environ.get("VIDEO_URL", "http://video-service:8004")
 
-for d in ["audio", "data", "segments", "output", "preview"]:
+for d in ["audio", "data", "segments", "output", "preview", "inbox"]:
     (SHARED_DIR / d).mkdir(parents=True, exist_ok=True)
+
+
+def api_error(res: requests.Response) -> str:
+    """Extract a readable message from a failed microservice response."""
+    try:
+        detail = res.json().get("detail")
+    except Exception:
+        detail = None
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    return (res.text or "").strip()[:500] or f"HTTP {res.status_code}"
+
+
+def check(res: requests.Response) -> None:
+    """raise_for_status() but keeps the service-side error detail visible."""
+    if res.status_code >= 400:
+        raise RuntimeError(f"[{res.url}] -> {api_error(res)}")
+
+
+def preflight(video_path: Path, expected_duration: float = 0.0) -> dict:
+    """Validate the staged input before spending GPU time on Whisper / MT / TTS.
+
+    A corrupt or partially blocked download must fail here, not 40 minutes later.
+    """
+    video_path = Path(video_path)
+    if not video_path.resolve().is_relative_to(SHARED_DIR.resolve()):
+        raise RuntimeError(f"preflight: file phải nằm trong shared volume, nhận được: {video_path}")
+    rel = video_path.resolve().relative_to(SHARED_DIR.resolve()).as_posix()
+    res = requests.post(f"{VIDEO_URL}/probe", json={"video_path": rel}, timeout=300)
+    if res.status_code >= 400:
+        raise RuntimeError(f"Video đầu vào không hợp lệ: {api_error(res)}")
+
+    info = res.json()
+    dur = float(info.get("duration") or 0.0)
+
+    if expected_duration and expected_duration > 0:
+        drift = abs(dur - expected_duration)
+        if drift > max(2.0, 0.05 * expected_duration):
+            raise RuntimeError(
+                f"Thời lượng tải về ({dur:.1f}s) lệch xa thời lượng mong đợi ({expected_duration:.1f}s). "
+                f"Video có thể bị chặn một phần hoặc bị cắt ngắn. Hãy upload file trực tiếp."
+            )
+
+    if not info.get("has_audio"):
+        raise RuntimeError(
+            f"Video ({dur:.1f}s, {info.get('video_codec')}) không có luồng âm thanh nên không thể làm STT/lồng tiếng."
+        )
+
+    mean_db = info.get("mean_volume_db")
+    if mean_db is not None and float(mean_db) < -50.0:
+        raise RuntimeError(
+            f"Âm thanh gần như im lặng (mean {mean_db:.1f} dB) — có thể video bị tắt tiếng hoặc file tải hỏng. "
+            f"Hãy thử upload file gốc từ máy."
+        )
+
+    print(
+        f"[preflight] OK {dur:.1f}s | {info.get('width')}x{info.get('height')} "
+        f"| {info.get('video_codec')}/{info.get('audio_codec')} "
+        f"| mean={mean_db}dB | {info.get('size_bytes', 0) / 1_048_576:.1f} MB"
+    )
+    return info
+
+
+def stage_to_inbox(video_local: str) -> Path:
+    """Copy an uploaded file into the staging dir (never touched by clean_shared_dir)."""
+    src = Path(video_local)
+    if not src.exists():
+        raise ValueError(f"Không tìm thấy file upload: {video_local}")
+    ext = src.suffix or ".mp4"
+    staged = SHARED_DIR / "inbox" / f"input_local{ext}"
+    return safe_copy(src, staged)
+
+
+# Gradio cache & UI results must NOT live on /shared_data: inside WSL2 that is a
+# 9p (drvfs) mount where os.sendfile() fails with OSError(ENOMEM), which is what
+# shutil.copy2() uses. Container-local ext4 avoids both the error and tmpfs/RAM use.
+PREVIEW_DIR = Path(os.environ.get("PREVIEW_DIR", "/var/tmp/omnidub_preview"))
+# Cap by count as well as size: with only a count cap, 6 voice previews would evict
+# a 40-minute restyle result that the UI is still showing.
+PREVIEW_KEEP = int(os.environ.get("PREVIEW_KEEP", "12"))
+PREVIEW_MAX_BYTES = int(float(os.environ.get("PREVIEW_MAX_GB", "3")) * 1024 ** 3)
+_PREVIEW_SEQ = itertools.count()
+
+
+def _preview_name(tag: str, suffix: str) -> str:
+    """Unique staging name: a second can produce many files (Tab 2 renders a whole gallery)."""
+    return f"{tag}_{int(time.time())}_{next(_PREVIEW_SEQ):05d}{suffix}"
+
+
+def _prune_preview_cache(protect: Path | None = None):
+    """Bound the preview cache by BOTH file count and total size (a dub can be 700MB).
+
+    `protect` (and the newest file) is never deleted, otherwise a single video larger
+    than the cap would delete the very file we just staged for the UI.
+    """
+    try:
+        files = sorted(PREVIEW_DIR.glob("*_*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        return
+    total = 0
+    for i, f in enumerate(files):
+        try:
+            total += f.stat().st_size
+        except Exception:
+            continue
+        if (protect is not None and f == protect) or i == 0:
+            continue
+        if i < PREVIEW_KEEP and total <= PREVIEW_MAX_BYTES:
+            continue
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def safe_copy(src, dst) -> Path:
+    """Copy a file, falling back to chunked read/write when sendfile() is unsupported."""
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(src, dst)
+    except OSError as e:
+        print(f"[i] sendfile copy failed ({e}); falling back to chunked copy: {src.name}")
+        with open(src, "rb") as f_in, open(dst, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out, length=4 * 1024 * 1024)
+    return dst
+
+
+def media_duration(path: Path) -> float:
+    """Do thoi luong (giay), tra 0.0 khi ffprobe khong doc duoc."""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            stderr=subprocess.DEVNULL).decode().strip()
+        return float(out)
+    except Exception:
+        return 0.0
+
+
+DUB_WAV_REL = "output/dubbed_audio.wav"
+
+
+def find_dub_audio(video_rel: str) -> str:
+    """Tra ve file thuyet minh dung cho video sap render, hoac "" neu khong co.
+
+    /merge cua Tab 1 de lai dubbed_audio.wav. Lay file cua tap khap don de
+    chong len tap nay thi con te hon im lang: lech noi dung voi hinh thi
+    khong ai phat hien ra luc xem lai.
+    """
+    dub = SHARED_DIR / DUB_WAV_REL
+    if not dub.exists():
+        return ""
+    v = media_duration(SHARED_DIR / video_rel)
+    # dubbed_audio.wav luon dai hon video 1 giay (tong mau + 1 s dem)
+    d = media_duration(dub)
+    if v <= 0 or d <= 0 or abs(d - v) > max(2.5, 0.05 * v):
+        print(f"[!] Bo qua thuyet minh: dub {d:.1f}s khong khop video {v:.1f}s")
+        return ""
+    return DUB_WAV_REL
+
+
+def stage_for_ui(src, tag: str = "out") -> str:
+    """Mirror a result file into PREVIEW_DIR and return that path for the UI components.
+
+    The real file stays in /shared_data/output (visible from Windows); only the
+    copy handed to gr.Video / gr.Audio / gr.Gallery comes from a Linux-native fs.
+    """
+    src = Path(src)
+    if not src.exists():
+        return str(src)
+    if src.resolve().is_relative_to(PREVIEW_DIR.resolve()):
+        return str(src)
+    try:
+        dst = safe_copy(src, PREVIEW_DIR / _preview_name(tag, src.suffix))
+    except Exception as e:
+        print(f"[!] Không stage được {src.name} cho UI: {e}")
+        return str(src)
+
+    # Keep the preview cache bounded so it cannot fill the container disk.
+    _prune_preview_cache(protect=dst)
+    return str(dst)
 
 
 def parse_time_str(t_str: str) -> float:
@@ -40,6 +223,16 @@ def clean_shared_dir():
             shutil.rmtree(p)
         p.mkdir(parents=True, exist_ok=True)
     (SHARED_DIR / "output").mkdir(parents=True, exist_ok=True)
+    (SHARED_DIR / "inbox").mkdir(parents=True, exist_ok=True)
+
+
+def clear_inbox():
+    """Remove previously staged inputs (called per run, after validation)."""
+    inbox = SHARED_DIR / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    for stale in inbox.iterdir():
+        if stale.is_file():
+            stale.unlink(missing_ok=True)
 
 
 def clean_video_url(url: str) -> str:
@@ -50,6 +243,16 @@ def clean_video_url(url: str) -> str:
     if bili_m:
         return f"https://www.bilibili.com/video/{bili_m.group(1)}/"
     return url
+
+
+def run_ffmpeg_checked(cmd: list[str]):
+    """Run FFmpeg and keep stderr for the error message instead of sending it to DEVNULL."""
+    args = cmd[1:] if cmd and cmd[0] == "ffmpeg" else cmd
+    proc = subprocess.run(["ffmpeg", "-hide_banner", *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        lines = [ln for ln in (proc.stderr or "").strip().splitlines() if ln.strip()]
+        tail = "\n".join(lines[-6:])
+        raise RuntimeError(f"FFmpeg thất bại (exit {proc.returncode}):\n{tail[-1000:]}")
 
 
 def crawl_hh3d_stream(url: str, out_dir: Path, download_full: bool = True) -> Path:
@@ -105,14 +308,39 @@ def crawl_hh3d_stream(url: str, out_dir: Path, download_full: bool = True) -> Pa
 
     # Remux to MP4
     cmd = ["ffmpeg", "-y", "-i", str(raw_ts), "-c", "copy", str(out_mp4)]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    run_ffmpeg_checked(cmd)
     raw_ts.unlink(missing_ok=True)
     return out_mp4
 
 
-def download_youtube(url: str, out_dir: Path, start_time: str = "", end_time: str = "") -> Path:
+# Human-readable explanations for the most common yt-dlp failures.
+BLOCK_HINTS = (
+    ("Sign in to confirm", "YouTube yêu cầu xác minh 'bạn không phải bot' (PO token). Cách xử lý: cập nhật yt-dlp (`pip install -U yt-dlp`) hoặc chuyển sang chế độ upload file."),
+    ("403: Forbidden", "Bị từ chối 403 — IP của bạn đã bị đánh dấu hoặc video yêu cầu đăng nhập. Thử upload file trực tiếp."),
+    ("not available in your country", "Video bị chặn theo khu vực (geo-block)."),
+    ("Video unavailable", "Video không còn tồn tại hoặc đã bị gỡ — thường do chủ sở hữu bản quyền yêu cầu takedown."),
+    ("confirm your age", "Video giới hạn tuổi, cần cookie của tài khoản đã đăng nhập."),
+    ("Requested format is not available", "Không lấy được format chất lượng cao — dấu hiệu thường gặp khi bị hạn chế anti-bot."),
+)
+
+
+def explain_download_error(err_text: str) -> str:
+    for needle, hint in BLOCK_HINTS:
+        if needle.lower() in err_text.lower():
+            return hint
+    return err_text[:600]
+
+
+def download_youtube(url: str, out_dir: Path, start_time: str = "", end_time: str = "", rights_confirmed: bool = False) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     clean_url = clean_video_url(url)
+
+    if not rights_confirmed:
+        raise ValueError(
+            "Tải video từ URL chỉ được phép khi bạn xác nhận có quyền sử dụng nội dung đó "
+            "(video của bạn / đã được cấp phép / giấy phép cho phép tạo tác phẩm phái sinh). "
+            "Nếu không, hãy upload file video trực tiếp."
+        )
 
     # Check if URL is from specialized anime sites like HH3D
     if "hh3d.com" in clean_url or "donghua" in clean_url:
@@ -126,7 +354,7 @@ def download_youtube(url: str, out_dir: Path, start_time: str = "", end_time: st
                 cmd_cut.extend(["-to", str(e_sec)])
             cut_mp4 = out_dir / "downloaded_video_cut.mp4"
             cmd_cut.extend(["-c", "copy", str(cut_mp4)])
-            subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            run_ffmpeg_checked(cmd_cut)
             return cut_mp4
         return full_video
 
@@ -136,42 +364,50 @@ def download_youtube(url: str, out_dir: Path, start_time: str = "", end_time: st
         "outtmpl": template,
         "merge_output_format": "mp4",
         "overwrites": True,
-        # Tự động tiếp tục và thử lại khi mạng đứt quãng
-        "retries": 15,
-        "fragment_retries": 15,
+        # Tự động tiếp tục khi mạng đứt quãng, nhưng retry có kiểm soát:
+        # retry dồn dập không tăng tỉ lệ thành công mà chỉ khiến IP bị đánh dấu nhanh hơn.
+        "retries": 3,
+        "fragment_retries": 3,
         "continuedl": True,
-        "file_access_retries": 10,
+        "file_access_retries": 3,
         "socket_timeout": 30,
         "http_chunk_size": 10485760,  # 10MB chunk để tránh timeout socket
-        "nocheckcertificate": True,
     }
 
     # If start_time or end_time is provided, download with external downloader ffmpeg args or post-trim
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(clean_url, download=True)
-        fn = ydl.prepare_filename(info)
-        p = Path(fn)
-        if not p.exists():
-            mp4_p = p.with_suffix(".mp4")
-            if mp4_p.exists():
-                p = mp4_p
-            else:
-                cands = list(out_dir.glob("downloaded_video.*"))
-                if cands:
-                    p = cands[0]
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(clean_url, download=True)
+            fn = ydl.prepare_filename(info)
+            p = Path(fn)
+            if not p.exists():
+                mp4_p = p.with_suffix(".mp4")
+                if mp4_p.exists():
+                    p = mp4_p
+                else:
+                    cands = list(out_dir.glob("downloaded_video.*"))
+                    if cands:
+                        p = cands[0]
+                    else:
+                        raise RuntimeError(
+                            f"yt-dlp không tạo ra file nào trong {out_dir}. "
+                            f"Video có thể đã bị chặn/gỡ hoặc yêu cầu đăng nhập."
+                        )
 
-        if start_time or end_time:
-            s_sec = parse_time_str(start_time) if start_time else 0.0
-            cmd_cut = ["ffmpeg", "-y", "-ss", str(s_sec), "-i", str(p)]
-            if end_time:
-                e_sec = parse_time_str(end_time)
-                cmd_cut.extend(["-to", str(e_sec)])
-            cut_mp4 = out_dir / "downloaded_video_cut.mp4"
-            cmd_cut.extend(["-c", "copy", str(cut_mp4)])
-            subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            return cut_mp4
+            if start_time or end_time:
+                s_sec = parse_time_str(start_time) if start_time else 0.0
+                cmd_cut = ["ffmpeg", "-y", "-ss", str(s_sec), "-i", str(p)]
+                if end_time:
+                    e_sec = parse_time_str(end_time)
+                    cmd_cut.extend(["-to", str(e_sec)])
+                cut_mp4 = out_dir / "downloaded_video_cut.mp4"
+                cmd_cut.extend(["-c", "copy", str(cut_mp4)])
+                run_ffmpeg_checked(cmd_cut)
+                return cut_mp4
 
-        return p
+            return p
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(f"Tải video thất bại: {explain_download_error(str(e))}")
 
 
 VOICE_KEY_MAP = {
@@ -208,50 +444,63 @@ def preview_voice_sample(voice_name: str, sample_text: str) -> str:
             "voice": voice_key
         }
     )
-    res.raise_for_status()
+    check(res)
     data = res.json()
     wav_rel = data["segments"][0]["audio"]
     src_wav = SHARED_DIR / wav_rel
     
     out_preview = SHARED_DIR / "preview" / f"sample_{voice_key}.wav"
-    shutil.copy(src_wav, out_preview)
-    return str(out_preview)
+    safe_copy(src_wav, out_preview)
+    return stage_for_ui(out_preview, "voice_preview")
 
 
-def run_orchestration(video_local: str, video_url: str, lang_choice: str, mode_choices: list[str], voice_choice: str, multi_speaker: bool, progress=gr.Progress()) -> str:
-    clean_shared_dir()
-    progress(0.05, desc="Xử lý nguồn video...")
+def resolve_input_source(video_local: str, video_url: str, rights_confirmed: bool = False) -> Path:
+    """Stage the input into SHARED_DIR/inbox WITHOUT touching previous results.
 
+    Upload-local is preferred over URL: it keeps the pipeline independent from
+    downloader anti-bot changes, and it is the only mode allowed without a
+    rights confirmation.
+    """
+    if video_local:
+        return stage_to_inbox(video_local)
+    if video_url and video_url.strip():
+        return download_youtube(video_url.strip(), SHARED_DIR / "inbox", rights_confirmed=rights_confirmed)
+    raise ValueError("Vui lòng upload video từ máy (khuyến nghị) hoặc nhập URL video mà bạn có quyền sử dụng.")
+
+
+def run_orchestration(video_local: str, video_url: str, lang_choice: str, mode_choices: list[str], voice_choice: str, multi_speaker: bool, rights_confirmed: bool = False, progress=gr.Progress()) -> str:
     enable_dub = "Lồng tiếng (Thuyết minh)" in mode_choices
     enable_sub = "Gắn phụ đề (Vietsub)" in mode_choices
 
     if not enable_dub and not enable_sub:
         raise ValueError("Vui lòng chọn ít nhất một tùy chọn: 'Lồng tiếng (Thuyết minh)' hoặc 'Gắn phụ đề (Vietsub)'.")
 
-    # 1. Resolve video
-    if video_url and video_url.strip():
-        video_path = download_youtube(video_url.strip(), SHARED_DIR / "audio")
-    elif video_local:
-        src = Path(video_local)
-        video_path = SHARED_DIR / "audio" / f"input{src.suffix}"
-        shutil.copy(src, video_path)
-    else:
-        raise ValueError("Vui lòng cung cấp URL YouTube/Bilibili hoặc upload video local.")
+    # 1. Resolve + validate input BEFORE wiping any previous results.
+    #    A blocked/corrupt download must cost seconds, not 40 minutes of GPU.
+    progress(0.05, desc="Kiểm tra nguồn video...")
+    staged = resolve_input_source(video_local, video_url, rights_confirmed)
+    preflight(staged)
+
+    # 2. Input is good -> now it is safe to clear the workspace
+    clean_shared_dir()
+    video_path = SHARED_DIR / "audio" / f"input{staged.suffix}"
+    safe_copy(staged, video_path)
+    clear_inbox()
 
     # Convert paths to relative to shared volume
     rel_video_path = video_path.relative_to(SHARED_DIR).as_posix()
 
-    # 2. Extract Audio via Video Service
+    # 3. Extract Audio via Video Service
     progress(0.15, desc="Tách audio từ video...")
     res = requests.post(f"{VIDEO_URL}/extract-audio", json={"video_path": rel_video_path})
-    res.raise_for_status()
+    check(res)
     audio_path = res.json()["audio_path"]
 
-    # 3. STT via STT Service (with Speaker Diarization)
+    # 4. STT via STT Service (with Speaker Diarization)
     progress(0.30, desc="Nhận dạng giọng nói & Phân tích hội thoại (Whisper + Diarization)...")
     lang_code = "zh" if lang_choice == "Tiếng Trung" else ("en" if lang_choice == "Tiếng Anh" else "auto")
     res = requests.post(f"{STT_URL}/transcribe", json={"audio_path": audio_path, "language": lang_code, "enable_diarization": multi_speaker})
-    res.raise_for_status()
+    check(res)
     stt_data = res.json()
     segments = stt_data["segments"]
     detected_lang = stt_data.get("detected_lang", "zh")
@@ -259,14 +508,14 @@ def run_orchestration(video_local: str, video_url: str, lang_choice: str, mode_c
     if not segments:
         raise RuntimeError("Không tìm thấy đoạn hội thoại nào trong video.")
 
-    # 4. Translation via Translation Service
+    # 5. Translation via Translation Service
     progress(0.50, desc="Dịch sang tiếng Việt (Opus-MT)...")
     source_lang = "en" if (lang_code == "en" or (lang_code == "auto" and detected_lang == "en")) else "zh"
     res = requests.post(f"{TRANS_URL}/translate", json={"segments": segments, "source_lang": source_lang})
-    res.raise_for_status()
+    check(res)
     segments = res.json()["segments"]
 
-    # 5. TTS via TTS Service
+    # 6. TTS via TTS Service
     if enable_dub:
         desc_txt = "Lồng tiếng hội thoại Đa Nhân Vật (Nam/Nữ tự động)..." if multi_speaker else f"Lồng tiếng thuyết minh ({voice_choice})..."
         progress(0.70, desc=desc_txt)
@@ -279,12 +528,12 @@ def run_orchestration(video_local: str, video_url: str, lang_choice: str, mode_c
                 "multi_speaker": multi_speaker
             }
         )
-        res.raise_for_status()
+        check(res)
         segments = res.json()["segments"]
     else:
         progress(0.70, desc="Bỏ qua lồng tiếng (chỉ làm Vietsub)...")
 
-    # 6. Muxing via Video Service
+    # 7. Muxing via Video Service
     progress(0.85, desc="Ghép video theo tùy chọn...")
     res = requests.post(
         f"{VIDEO_URL}/merge",
@@ -295,12 +544,13 @@ def run_orchestration(video_local: str, video_url: str, lang_choice: str, mode_c
             "enable_subtitle": enable_sub
         }
     )
-    res.raise_for_status()
+    check(res)
     final_rel = res.json()["output_video"]
     final_video = SHARED_DIR / final_rel
 
     progress(1.0, desc="Hoàn tất!")
-    return str(final_video)
+    # (đường dẫn cho UI, đường dẫn thật trên Windows) - xem stage_for_ui()
+    return stage_for_ui(final_video, "dubbed"), str(final_video)
 
 
 def trim_video_action(video_in: str, start_t: str, end_t: str, out_name: str) -> tuple[str, str]:
@@ -316,7 +566,7 @@ def trim_video_action(video_in: str, start_t: str, end_t: str, out_name: str) ->
             rel_path = v_p.relative_to(SHARED_DIR).as_posix()
         else:
             rel_path = f"output/{v_p.name}"
-            shutil.copy(v_p, SHARED_DIR / rel_path)
+            safe_copy(v_p, SHARED_DIR / rel_path)
 
     res = requests.post(
         f"{VIDEO_URL}/trim",
@@ -327,11 +577,11 @@ def trim_video_action(video_in: str, start_t: str, end_t: str, out_name: str) ->
             "output_filename": out_name
         }
     )
-    res.raise_for_status()
+    check(res)
     data = res.json()
     out_file = SHARED_DIR / data["trimmed_video"]
     msg = f"Đã cắt thành công đoạn ({data['start_sec']}s -> {data['end_sec']}s, dài {data['duration']}s)!\nFile lưu tại: {out_file}"
-    return str(out_file), msg
+    return stage_for_ui(out_file, "trimmed"), msg
 
 
 def main():
@@ -349,22 +599,30 @@ def main():
             with gr.TabItem("🎙️ 1. Lồng Tiếng & Gắn Vietsub"):
                 with gr.Row():
                     with gr.Column(scale=1):
+                        file_box = gr.Video(
+                            label="1. Upload video từ máy (khuyến nghị - ổn định nhất, không phụ thuộc tải URL)",
+                            sources=["upload"]
+                        )
                         url_box = gr.Textbox(
-                            label="1. Nhập URL YouTube / Bilibili",
+                            label="2. Hoặc nhập URL YouTube / Bilibili",
                             placeholder="https://www.bilibili.com/video/... hoặc https://youtube.com/..."
                         )
-                        file_box = gr.Video(label="Hoặc upload file video từ máy", sources=["upload"])
-                        
+                        rights_toggle = gr.Checkbox(
+                            label="⚖️ Tôi xác nhận có quyền sử dụng nội dung ở URL trên (video của tôi / đã được cấp phép / giấy phép cho phép tạo tác phẩm phái sinh)",
+                            value=False,
+                            info="Bắt buộc tích để bật chế độ tải từ URL. Upload file trực tiếp không cần xác nhận này."
+                        )
+
                         lang_choice = gr.Radio(
                             choices=["Tự động nhận diện", "Tiếng Trung", "Tiếng Anh"],
                             value="Tự động nhận diện",
-                            label="2. Ngôn ngữ nguồn của video"
+                            label="3. Ngôn ngữ nguồn của video"
                         )
                         
                         mode_choices = gr.CheckboxGroup(
                             choices=["Gắn phụ đề (Vietsub)", "Lồng tiếng (Thuyết minh)"],
                             value=["Gắn phụ đề (Vietsub)", "Lồng tiếng (Thuyết minh)"],
-                            label="3. Chế độ đầu ra mong muốn"
+                            label="5. Chế độ đầu ra mong muốn"
                         )
 
                         multi_speaker_toggle = gr.Checkbox(
@@ -376,7 +634,7 @@ def main():
                             voice_choice = gr.Dropdown(
                                 choices=list(VOICE_KEY_MAP.keys()),
                                 value="Nữ - Hoài My (Truyền cảm, tiêu chuẩn)",
-                                label="4. Chọn giọng đọc mặc định (dùng khi không bật Đa nhân vật)",
+                                label="6. Chọn giọng đọc mặc định (dùng khi không bật Đa nhân vật)",
                                 interactive=True
                             )
                             with gr.Row():
@@ -409,10 +667,10 @@ def main():
                     outputs=[preview_audio]
                 )
 
-                def handle_pipeline(f, u, l, m, v, multi_spk):
+                def handle_pipeline(f, u, l, m, v, multi_spk, rights_ok):
                     try:
-                        out = run_orchestration(f, u, l, m, v, multi_spk)
-                        return out, f"Thành công! Video đã lưu tại:\n{out}"
+                        ui_path, real_path = run_orchestration(f, u, l, m, v, multi_spk, rights_confirmed=rights_ok)
+                        return ui_path, f"Thành công! Video đã lưu tại:\n{real_path}"
                     except Exception as e:
                         import traceback
                         traceback.print_exc()
@@ -420,7 +678,7 @@ def main():
 
                 btn.click(
                     fn=handle_pipeline,
-                    inputs=[file_box, url_box, lang_choice, mode_choices, voice_choice, multi_speaker_toggle],
+                    inputs=[file_box, url_box, lang_choice, mode_choices, voice_choice, multi_speaker_toggle, rights_toggle],
                     outputs=[out_video, status]
                 )
 
@@ -551,9 +809,9 @@ def main():
                             if not fallback_src.exists() or fallback_src.stat().st_size < 5000:
                                 fallback_src = SHARED_DIR / "preview" / "sample_real_3d.jpg"
                             if fallback_src.exists():
-                                shutil.copy(fallback_src, img_path)
+                                safe_copy(fallback_src, img_path)
 
-                        image_paths.append(str(img_path))
+                        image_paths.append(stage_for_ui(img_path, "scene"))
 
                         # 2. GENERATE AUDIO VOICE FOR THIS SCENE (TTS Service)
                         audio_path = scenes_dir / f"audio_{scene_idx}.wav"
@@ -569,7 +827,7 @@ def main():
                             )
                             tts_data = tts_res.json()
                             gen_audio = SHARED_DIR / tts_data["segments"][0]["audio"]
-                            shutil.copy(gen_audio, audio_path)
+                            safe_copy(gen_audio, audio_path)
                         except Exception as e:
                             print(f"[!] TTS error scene {scene_idx}: {e}")
 
@@ -625,7 +883,7 @@ def main():
 
                     progress(1.0, desc="Đã hoàn tất chuyển thể Truyện ➔ Phim Hoạt Hình 3D!")
                     msg = f"Đã chuyển thể thành công {len(image_paths)} cảnh với Nhân vật 3D & Giọng đọc thuyết minh tại:\n{final_movie_path}"
-                    return msg, image_paths, str(final_movie_path)
+                    return msg, image_paths, stage_for_ui(final_movie_path, "movie")
 
                 gen_media_btn.click(
                     fn=render_3d_scenes_and_movie,
@@ -699,10 +957,13 @@ def main():
                 gr.Markdown(
                     """
                     ### 🎨 Chuyển Thể Video 3D Gốc Thành Phim Hoạt Hình 2D Độc Quyền
-                    Tải video 3D bất kỳ (hoặc dùng video vừa tải từ Bilibili/YouTube). Hệ thống AI sẽ:
-                    1. **Bóc tách nét vẽ đen (Line-art)**: Giữ nguyên 100% từng chuyển động, động tác võ thuật và góc quay của video gốc.
-                    2. **Làm phẳng màu 2D (Cel-Shading)**: Xóa bỏ hoàn toàn lớp đổ bóng 3D của họ, biến thành màu sắc vẽ tay phong cách Anime/Manga 2D.
-                    3. **Xuất ra video 2D mới toanh** thuộc quyền sở hữu của bạn, không lo vi phạm bản quyền video 3D của tác giả gốc!
+                    Dán link (Bilibili/YouTube/HH3D) hoặc upload file — hệ thống tự tải, cắt theo khoảng thời gian, rồi:
+                    1. **Tẩy chữ burn-in**: logo bit.ly/bilibili/牧神記 ở 3 góc và phụ đề Trung Quốc ở đáy (phụ đề được *tìm từng chữ*, không xoá trọn dải vì dải đó có chân nhân vật).
+                    2. **Phá kết cấu 3D**: mean-shift gom ảnh về các vùng màu phẳng, sau đó lượng tử hoá cả video vào **một bảng màu chung** để màu không nhảy flicker giữa các frame.
+                    3. **Vẽ lại nét**: chỉ giữ nét dài, vẽ lại đều tay bằng drawContours; bỏ hẳn lớp đổ bóng mềm của render 3D.
+                    4. **Giảm còn 12.5 fps** (draw on twos) nếu chọn — vừa đúng cách vẽ anime, vừa giảm nửa thời gian.
+
+                    ⚠️ Giới hạn thật: đây là vẽ lại **màu và nét** từng frame, không phải vẽ lại **hình học khuôn mặt** — mắt/mũi vẫn là khuôn mặt 3D. Muốn sang anime thực sự ở phần mặt cần khuếch tán (diffusion), chi phí 6–14 giờ/tập.
                     """
                 )
                 with gr.Row():
@@ -710,6 +971,11 @@ def main():
                         restyle_url_box = gr.Textbox(
                             label="1. Nhập URL video cần crawl (YouTube / Bilibili / HH3D)",
                             placeholder="https://www.bilibili.com/video/... hoặc https://youtube.com/..."
+                        )
+                        restyle_rights_toggle = gr.Checkbox(
+                            label="⚖️ Tôi xác nhận có quyền sử dụng nội dung ở URL trên",
+                            value=False,
+                            info="Bắt buộc để bật tải từ URL. Upload file hoặc dùng video vừa tạo không cần xác nhận này."
                         )
                         with gr.Row():
                             restyle_start_time = gr.Textbox(
@@ -728,24 +994,39 @@ def main():
                         )
                         restyle_style = gr.Dropdown(
                             choices=[
+                                "Cel Flat 2D (Phá kết cấu 3D, bảng màu khoá cả video, vẽ lại nét) - Khuyên dùng",
                                 "AnimeGAN AI 2D (Chuyển thể Mạng Neural - Phong cách Hoạt hình Shinkai/Ghibli)",
                                 "Anime 2D Cel-Shading (Nét vẽ tay Manga, màu phẳng tươi sáng)",
                                 "2D Hoạt Hình Comic (Nét viền đậm, phong cách truyện tranh)"
                             ],
-                            value="AnimeGAN AI 2D (Chuyển thể Mạng Neural - Phong cách Hoạt hình Shinkai/Ghibli)",
+                            value="Cel Flat 2D (Phá kết cấu 3D, bảng màu khoá cả video, vẽ lại nét) - Khuyên dùng",
                             label="2. Chọn phong cách vẽ 2D"
+                        )
+                        restyle_twos = gr.Checkbox(
+                            label="️ Vẽ 12.5 fps kiểu anime (draw on twos)",
+                            value=True,
+                            info="Bỏ nửa số khung hình, đúng cách vẽ anime truyền thống và giảm nửa thời gian render (khoảng 40 phút cho một tập)."
+                        )
+                        restyle_palette = gr.Slider(
+                            label="Số màu bảng màu 2D (ít màu = phẳng và graphic hơn)",
+                            minimum=8, maximum=28, step=2, value=16
                         )
 
                         with gr.Group():
                             anti_copyright_toggle = gr.Checkbox(
                                 label="🛡️ Bật LÁ CHẮN BẢN QUYỀN (Anti-Copyright Shield)",
                                 value=True,
-                                info="Tự động phá vỡ thuật toán Content ID: Zoom 104%, Tăng tốc vi mô 1.03x và Đổi cao độ âm thanh (Pitch-shift 4%) mà không làm mất chất giọng"
+                                info="Tự động phá vỡ thuật toán Content ID: Zoom 104%, Tăng tốc vi mô 1.03x; pitch-shift chỉ áp dụng khi video vẫn còn giữ tiếng gốc"
                             )
                             flip_horizontal_toggle = gr.Checkbox(
                                 label="🪞 Lật gương khung hình ngang (Horizontal Flip)",
                                 value=False,
                                 info="Đảo ngược khung hình từ trái sang phải, vô hiệu hóa hoàn toàn đối chiếu Motion Vector của YouTube"
+                            )
+                            restyle_keep_orig = gr.Checkbox(
+                                label="🔊 Giữ tiếng gốc của kênh trong video 2D",
+                                value=False,
+                                info="Mặc định TẮT: bỏ tiếng Trung + nhạc nền gốc, chỉ giữ phần thuyết minh nếu đã chạy Tab 1. Chưa có thuyết minh thì video 2D sẽ im lặng."
                             )
                         
                         restyle_btn = gr.Button("🎨 Bắt đầu Tải & Vẽ Lại Thành Video 2D", variant="primary", size="lg")
@@ -754,10 +1035,16 @@ def main():
                         restyle_video_out = gr.Video(label="🎬 Video 2D Hoàn Chỉnh Sau Khi Vẽ Lại", interactive=False)
                         restyle_status = gr.Textbox(label="Tiến trình vẽ lại", interactive=False)
 
-                def handle_restyle(url_in, start_t, end_t, v_in, style_val, anti_cp, flip_h, progress=gr.Progress()):
+                def handle_restyle(url_in, start_t, end_t, v_in, style_val, twos, palette_k, anti_cp, flip_h, keep_orig, rights_ok, progress=gr.Progress()):
                     if url_in and url_in.strip():
-                        progress(0.1, desc="Đang crawl và tải đoạn video yêu cầu về...")
-                        dl_path = download_youtube(url_in.strip(), SHARED_DIR / "audio", start_time=start_t.strip(), end_time=end_t.strip())
+                        progress(0.1, desc="Đang tải đoạn video yêu cầu về...")
+                        dl_path = download_youtube(
+                            url_in.strip(), SHARED_DIR / "audio",
+                            start_time=start_t.strip(), end_time=end_t.strip(),
+                            rights_confirmed=rights_ok
+                        )
+                        # Fail fast here instead of rendering 60 phút trên file hỏng
+                        preflight(dl_path)
                         rel_p = dl_path.relative_to(SHARED_DIR).as_posix()
                     elif v_in:
                         p = Path(v_in)
@@ -765,7 +1052,7 @@ def main():
                             rel_p = p.relative_to(SHARED_DIR).as_posix()
                         else:
                             rel_p = f"output/input_restyle_{p.name}"
-                            shutil.copy(p, SHARED_DIR / rel_p)
+                            safe_copy(p, SHARED_DIR / rel_p)
                     else:
                         # Find cut video or downloaded video or dubbed video
                         cands = list((SHARED_DIR / "audio").glob("downloaded_video_cut.mp4")) or list((SHARED_DIR / "audio").glob("downloaded_video.*"))
@@ -778,7 +1065,8 @@ def main():
                             else:
                                 raise ValueError("Vui lòng nhập link video hoặc upload video cần vẽ lại trước.")
 
-                    progress(0.3, desc="Đang tẩy watermark & chuyển thể đồ họa sang phong cách Anime 2D...")
+                    progress(0.3, desc="Đang xây bảng màu 2D, tẩy chữ và vẽ lại từng khung hình...")
+                    dub_rel = "" if keep_orig else find_dub_audio(rel_p)
                     out_name = f"anime_2d_{int(time.time())}.mp4"
                     res = requests.post(
                         f"{VIDEO_URL}/restyle-2d",
@@ -788,20 +1076,33 @@ def main():
                             "output_filename": out_name,
                             "remove_watermark": True,
                             "anti_copyright": anti_cp,
-                            "flip_horizontal": flip_h
+                            "flip_horizontal": flip_h,
+                            "dub_audio_path": dub_rel,
+                            "keep_original_audio": bool(keep_orig),
+                            "fps_div": 2 if twos else 1,
+                            "palette_k": int(palette_k),
                         },
                         timeout=3600  # Cho phép render tới 60 phút cho các tập phim dài mà không bị timeout
                     )
-                    res.raise_for_status()
+                    check(res)
                     data = res.json()
                     out_f = SHARED_DIR / data["restyle_video"]
                     progress(1.0, desc="Hoàn tất vẽ lại video!")
-                    msg = f"Đã vẽ lại thành công {data['frames_processed']} khung hình sang phong cách Hoạt hình 2D!\nFile lưu tại: {out_f}"
-                    return str(out_f), msg
+                    AUDIO_MSG = {
+                        "thuyet minh": "🔊 Audio: thuyết minh tiếng Việt. Đã bỏ tiếng gốc.",
+                        "goc": "🔊 Audio: VẪN CÒN TIẾNG GỐC theo lựa chọn của bạn — đây là phần dễ bị đối chiếu bản quyền nhất.",
+                        "khong co": "🔇 Video 2D xuất ra KHÔNG CÓ TIẾNG: không tìm thấy phần thuyết minh cho đúng đoạn này. Muốn có tiếng Việt thì chạy Tab 1 (Lồng tiếng) trước rồi quay lại Tab 3.",
+                    }
+                    audio_msg = AUDIO_MSG.get(data.get("audio_kind"), f"🔊 Audio: {data.get('audio_kind')}")
+                    msg = (f"Đã vẽ lại thành công {data['frames_processed']} khung hình sang phong cách Hoạt hình 2D!\n"
+                           f"{audio_msg}\nFile lưu tại: {out_f}")
+                    return stage_for_ui(out_f, "restyle"), msg
 
                 restyle_btn.click(
                     fn=handle_restyle,
-                    inputs=[restyle_url_box, restyle_start_time, restyle_end_time, restyle_input_video, restyle_style, anti_copyright_toggle, flip_horizontal_toggle],
+                    inputs=[restyle_url_box, restyle_start_time, restyle_end_time, restyle_input_video,
+                            restyle_style, restyle_twos, restyle_palette, anti_copyright_toggle,
+                            flip_horizontal_toggle, restyle_keep_orig, restyle_rights_toggle],
                     outputs=[restyle_video_out, restyle_status]
                 )
 
@@ -850,7 +1151,7 @@ def main():
                 )
 
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port, allowed_paths=["/shared_data"])
+    demo.launch(server_name="0.0.0.0", server_port=port, allowed_paths=["/shared_data", str(PREVIEW_DIR)])
 
 
 if __name__ == "__main__":

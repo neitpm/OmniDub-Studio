@@ -6,12 +6,15 @@ __pycache__/
 *.pyc
 
 # Shared runtime volume data & temp files
-shared_data/
-audio/
-data/
-segments/
-output/
-video/
+# Cac thu muc nay dat dau / de chi match o goc repo.
+# Neu bo dau / thi `video/` âm thầm chăn luôn `services/video/`
+# (đã kiểm chung bang `git check-ignore -v services/video/NEWTEST.py`).
+/shared_data/
+/audio/
+/data/
+/segments/
+/output/
+/video/
 *.mp4
 *.m4a
 *.wav
@@ -20,3 +23,21 @@ video/
 # Secrets or caches
 .cache/
 .pytest_cache/
+
+# Model weights (13 GB - tai lai bang tools/dl_models.sh, khong bao gio commit)
+models/
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# Electron app (node_modules ~200 MB + file .exe dong goi)
+node_modules/
+electron/node_modules/
+electron/dist/
+*.asar
+*.exe
+
+# Log & anh man hinh tam thoi
+*.log
+screenshots/

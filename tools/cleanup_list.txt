@@ -1,0 +1,16 @@
+d:\translate\output\test_speech_only.mp4
+d:\translate\shared_data\output\anime_2d_1793759858.mp4
+d:\translate\shared_data\output\anime_2d_1793715661.mp4
+d:\translate\shared_data\output\anime_2d_1793774384.mp4
+d:\translate\shared_data\preview\SHEET_*.jpg
+d:\translate\shared_data\preview\CEL_*.jpg
+d:\translate\shared_data\preview\ANIME_*.jpg
+d:\translate\shared_data\preview\SAU_*.jpg
+d:\translate\shared_data\preview\DI_MOI_*.jpg
+d:\translate\shared_data\preview\LUOI_*.jpg
+d:\translate\shared_data\preview\GAN_*.jpg
+d:\translate\shared_data\preview\CN_*.jpg
+d:\translate\shared_data\preview\AUDIT_*.jpg
+d:\translate\shared_data\preview\E2E_*.jpg
+d:\translate\shared_data\preview\FIX_*.jpg
+d:\translate\shared_data\preview\TEST_*.jpg

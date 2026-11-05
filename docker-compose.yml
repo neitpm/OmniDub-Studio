@@ -15,6 +15,10 @@ services:
       - TTS_URL=http://tts-service:8003
       - VIDEO_URL=http://video-service:8004
       - PORT=7860
+      # /shared_data la mount 9p trong WSL2 -> sendfile() fail (ENOMEM) va tmpfs day RAM.
+      # Cache va preview cua Gradio do vay nam tren file system noi bo container.
+      - PREVIEW_DIR=/var/tmp/omnidub_preview
+      - GRADIO_TEMP_DIR=/var/tmp/gradio
     volumes:
       - ./shared_data:/shared_data
     depends_on:
